@@ -24,7 +24,7 @@ Dockerfile + nginx.conf  # multi-stage Vite build → Nginx :80, SPA + /api prox
 ## Tab Upload
 
 - Categories (manual): `outage_records`, `connection_docs` (AES badge), `drone_videos`
-- Note only for `meter_readings` (simulator)
+- Note only for `meter_readings` (simulator — nu se încarcă manual)
 - Meta optional: zone (Muntenia/Banat/Dobrogea), station, description
 - Files ≤5MB → `POST /ingest`; >5MB or drone → chunked `POST /upload/chunk` (5MB slices, 3 retries exponential backoff)
 - Progress: %, chunk N/M, MB/s, retry status
@@ -53,7 +53,41 @@ Dockerfile + nginx.conf  # multi-stage Vite build → Nginx :80, SPA + /api prox
 - Chunk upload ~12% simulated failure for retry demo
 - Toggle mock off: `.env` → `VITE_USE_MOCK=false`
 
-## Run
+## Simulator (`../simulator/`)
+
+Trimite continuu citiri de contor către **API FileGrid**, nu către frontend.
+
+| | |
+|---|---|
+| Entry | `sim.py` — flota ~1000 contoare, rate control, storm 10× |
+| Fake API | `mock_api.py` — `202` nou, `409` duplicate, `503` aleatoriu (retry) |
+| Control | `:8080` — `/health`, `/status`, `POST /mode`, `PATCH /config`, `POST /duplicates/burst`, `/metrics` |
+| Target | `API_URL` default `https://nginx/api/v1/ingest` |
+
+**Ingest (multipart, `INGEST_MODE=multipart`):**
+- `file` = JSON reading (`meter_id`, `timestamp`, `zone`, energy/instant/events…)
+- `category` = `meter_readings`
+- `metadata` = `{meter_id, timestamp, zone, source: "meter-simulator"}`
+- Headers: `Idempotency-Key: {meter_id}:{timestamp}`, optional `Authorization: Bearer`, `X-Source`
+
+**Compat cu frontend/contract:** aceleași categorii + zone (Muntenia/Banat/Dobrogea); UI așteaptă `meter_readings` din simulator.  
+**Nu e legat de Mock Mode:** cu `VITE_USE_MOCK=true` citirile **nu apar** în tab Fișiere (localStorage browser ≠ HTTP ingest). E2E UI = backend real + `VITE_USE_MOCK=false`.
+
+### Test rapid simulator (fără backend)
+
+```bash
+cd simulator && pip install -r requirements.txt
+python mock_api.py                          # :9000
+# alt terminal:
+set API_URL=http://127.0.0.1:9000/api/v1/ingest
+set VERIFY_TLS=false
+set BASE_RATE=5
+python sim.py                               # control :8080
+```
+
+Check: `GET :8080/status`, `GET :9000/stats` · Storm: `POST :8080/mode {"mode":"storm"}` · Idempotency: `POST :8080/duplicates/burst {"count":50}` → crește `duplicate_rejected`, nu `unique_rows`.
+
+## Run frontend
 
 ```bash
 cd frontend && npm install && npm run dev   # :5173

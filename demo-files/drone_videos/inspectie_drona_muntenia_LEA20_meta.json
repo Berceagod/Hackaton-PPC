@@ -1,0 +1,8 @@
+{
+  "filename": "inspectie_drona_muntenia_LEA20_small.mp4",
+  "category": "drone_videos",
+  "zone": "Muntenia",
+  "station": "LEA 20kV Ploiești",
+  "description": "Inspecție coridor vegetație, stâlpi 40–72",
+  "note": "Clip scurt generat pentru demo chunked upload (>5 MB dacă encoder-ul e disponibil). Puneți aici și MP4-urile voastre mari (*_med / *_large) — sunt ignorate de git/Docker."
+}
