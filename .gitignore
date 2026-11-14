@@ -7,3 +7,6 @@ __pycache__/
 node_modules/
 .DS_Store
 .venv/
+demo-files/drone_videos/*.mp4
+demo-files/drone_videos/*.mov
+demo-files/drone_videos/*.mkv
