@@ -1,0 +1,76 @@
+// Grafana Alloy (slice H): ships the logs of THIS compose project's containers to Loki.
+//
+// It learns about containers through a read-only Docker API proxy that shares Alloy's
+// network namespace and listens on 127.0.0.1 only (see docker-compose.yml, `docker-proxy`),
+// so no other container can reach the Docker API through it (ADR-0017).
+//
+// Our services log one JSON object per line: the level becomes a label (low cardinality)
+// and the trace id becomes structured metadata (high cardinality, filtered cheaply).
+
+discovery.docker "containers" {
+  host             = "tcp://127.0.0.1:2375"
+  refresh_interval = "5s"
+
+  // Only this project's containers: never read the logs of anything else on the host.
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.project=" + sys.env("LOKI_COMPOSE_PROJECT")]
+  }
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "containers" {
+  host             = "tcp://127.0.0.1:2375"
+  targets          = discovery.relabel.containers.output
+  forward_to       = [loki.process.logs.receiver]
+  refresh_interval = "5s"
+}
+
+loki.process "logs" {
+  // Non-JSON lines (databases, MinIO, FTP) simply have nothing to extract.
+  stage.json {
+    expressions = {
+      level    = "level",
+      trace_id = "trace_id",
+    }
+  }
+
+  stage.template {
+    source   = "level"
+    template = "{{ if .Value }}{{ ToLower .Value }}{{ end }}"
+  }
+
+  stage.labels {
+    values = {
+      level = "",
+    }
+  }
+
+  stage.structured_metadata {
+    values = {
+      trace_id = "",
+    }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

@@ -21,6 +21,11 @@ x-backend-env: &backend-env
   POLICIES_PATH: /app/policies.yaml
 
   # ---- slice H (observability) backend env: add directly below this line ----
+  # Several workers per container: every worker writes its metrics into this directory and
+  # /metrics aggregates them (prometheus_client multiprocess mode, ADR-0014).
+  PROMETHEUS_MULTIPROC_DIR: /tmp/prom_multiproc
+  PROMETHEUS_SAMPLE_SECONDS: ${PROMETHEUS_SAMPLE_SECONDS:-10}
+  PROMETHEUS_UPLOAD_STALL_SECONDS: ${PROMETHEUS_UPLOAD_STALL_SECONDS:-300}
 
   # ---- slice I (analytics) backend env: add directly below this line ----
 
@@ -171,6 +176,119 @@ services:
     restart: unless-stopped
 
   # ---- slice H (observability) services: add directly below this line ----
+  # None of these publishes a host port: they are reached through the gateway (Grafana at
+  # https://localhost/grafana/) or from inside the Docker network.
+
+  prometheus:           # metrics store + alert rules; scrapes EVERY backend replica (DNS discovery)
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2d
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      - alertmanager
+    networks: [internal]
+    restart: unless-stopped
+
+  alertmanager:         # groups alerts and sends them to the webhook below
+    image: prom/alertmanager:v0.28.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./infrastructure/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    depends_on:
+      alert-webhook:
+        condition: service_healthy
+    networks: [internal]
+    restart: unless-stopped
+
+  alert-webhook:        # stands in for the team's channel: logs and keeps every alert (GET /alerts)
+    build: ./infrastructure/alertmanager/webhook
+    networks: [internal]
+    restart: unless-stopped
+
+  loki:                 # log store (48 h)
+    image: grafana/loki:3.5.5
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./infrastructure/loki/loki.yml:/etc/loki/loki.yml:ro
+      - lokidata:/loki
+    networks: [internal]
+    restart: unless-stopped
+
+  alloy:                # log collector: this project's container logs -> Loki
+    image: grafana/alloy:v1.11.0
+    command:
+      - run
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    environment:
+      LOKI_COMPOSE_PROJECT: ${LOKI_COMPOSE_PROJECT:-hackaton-ppc}
+    volumes:
+      - ./infrastructure/alloy/config.alloy:/etc/alloy/config.alloy:ro
+    depends_on:
+      - loki
+    networks: [internal]
+    restart: unless-stopped
+
+  # Read-only Docker API for Alloy (container list + logs, GET only: no start/stop/exec).
+  # It shares Alloy's network namespace and is bound to 127.0.0.1, so no other container can
+  # reach the Docker API through it. It mounts the Docker socket, which is why it is isolated
+  # like this; see ADR-0017 for the trade-off.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    network_mode: "service:alloy"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - "sed 's/\\$${BIND_CONFIG}/127.0.0.1:2375/g' /usr/local/etc/haproxy/haproxy.cfg.template > /usr/local/etc/haproxy/haproxy.cfg && exec haproxy -W -db -f /usr/local/etc/haproxy/haproxy.cfg"
+    environment:
+      CONTAINERS: "1"
+      NETWORKS: "1"
+      EVENTS: "1"
+      INFO: "1"
+      PING: "1"
+      VERSION: "1"
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+  grafana:              # dashboards as code + log search; https://localhost/grafana/ (user: admin)
+    image: grafana/grafana:12.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?run ./start.sh}
+      GF_SERVER_ROOT_URL: https://localhost/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/filegrid-ops.json
+    volumes:
+      - ./infrastructure/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infrastructure/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+    networks: [internal]
+    restart: unless-stopped
 
   # ---- slice I (analytics) services: add directly below this line ----
 
@@ -189,6 +307,9 @@ volumes:
   ftpdata: {}
 
   # ---- slice H (observability) volumes: add directly below this line ----
+  promdata: {}
+  lokidata: {}
+  grafanadata: {}
 
   # ---- slice I (analytics) volumes: add directly below this line ----
 

@@ -11,6 +11,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import HTTPException
 
+import metrics
+
 DEFAULT_LIMITS = {"high": 64, "normal": 32, "low": 8}
 
 
@@ -32,6 +34,7 @@ class Bulkheads:
         try:
             await asyncio.wait_for(sem.acquire(), self._wait)
         except (asyncio.TimeoutError, TimeoutError):
+            metrics.bulkhead_rejected(category)
             raise HTTPException(
                 503, f"Category '{category}' is at capacity; retry",
                 headers={"Retry-After": "1"},

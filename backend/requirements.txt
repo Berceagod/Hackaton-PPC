@@ -9,6 +9,7 @@ PyYAML==6.0.2
 cryptography==44.0.0
 
 # ---- slice H (observability) dependencies: add directly below this line ----
+prometheus-client==0.21.1
 
 # ---- slice I (analytics) dependencies: add directly below this line ----
 

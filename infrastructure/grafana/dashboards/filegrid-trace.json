@@ -1,0 +1,179 @@
+{
+  "uid": "filegrid-trace",
+  "title": "FileGrid — Trace one operation",
+  "description": "Follow one request from the gateway to the storage and back with its trace id.",
+  "tags": [
+    "filegrid"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "timezone": "browser",
+  "refresh": "5s",
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "trace_id",
+        "label": "Trace id",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "hide": 0,
+        "description": "The X-Trace-Id of the operation (returned in every response header and in the upload confirmation)."
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "text",
+      "title": "How to use",
+      "options": {
+        "mode": "markdown",
+        "content": "Every request gets a **trace id** (`X-Trace-Id` response header; the UI shows it after an upload). Paste it above to see, in time order, the gateway access line, the backend request, the file being stored, **each storage call** (which storage, which operation, how long) and the download. A meter reading accepted during a storage outage keeps its original trace id when it is written out later. Click any trace id in a log line to jump to all of its logs."
+      },
+      "id": 1,
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Everything that happened under this trace id",
+      "description": "",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{service=~\"backend|nginx\"} |= \"$trace_id\"",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Ascending",
+        "dedupStrategy": "none",
+        "prettifyLogMessage": false
+      },
+      "id": 2,
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Storage calls only (spans)",
+      "description": "One line per call into a storage: storage, operation, outcome and duration_ms.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{service=\"backend\"} |= \"storage op\" |= \"$trace_id\"",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Ascending",
+        "dedupStrategy": "none",
+        "prettifyLogMessage": false
+      },
+      "id": 3,
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Gateway access log",
+      "description": "",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{service=\"nginx\"} |= \"$trace_id\"",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Ascending",
+        "dedupStrategy": "none",
+        "prettifyLogMessage": false
+      },
+      "id": 4,
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      }
+    }
+  ],
+  "links": [
+    {
+      "title": "Operations",
+      "type": "link",
+      "url": "/grafana/d/filegrid-ops",
+      "icon": "dashboard"
+    },
+    {
+      "title": "Business guarantees",
+      "type": "link",
+      "url": "/grafana/d/filegrid-guarantees",
+      "icon": "dashboard"
+    },
+    {
+      "title": "Trace one operation",
+      "type": "link",
+      "url": "/grafana/d/filegrid-trace",
+      "icon": "dashboard"
+    }
+  ]
+}

@@ -38,6 +38,10 @@ ensure DISPECER_PASSWORD "$(rand | head -c 16)"
 ensure ADMIN_PASSWORD "$(rand | head -c 16)"
 
 # ---- slice H (observability) secrets: ensure KEY "$(rand)" (also in start.ps1): add directly below this line ----
+# Login for Grafana (https://localhost/grafana/, user "admin"); read it from .env.
+_graf="$(rand)"; ensure GRAFANA_ADMIN_PASSWORD "${_graf:0:20}"
+# Not a secret: which compose project's container logs go to Loki (its name is the directory's).
+ensure LOKI_COMPOSE_PROJECT "${COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-')}"
 
 # ---- slice I (analytics) secrets: ensure KEY "$(rand)" (also in start.ps1): add directly below this line ----
 

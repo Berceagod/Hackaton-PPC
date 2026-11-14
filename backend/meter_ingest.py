@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
+import metrics
 from crypto_envelope import encrypt_stream
 from repo import FileRecord
 from storage.base import StorageError
@@ -109,6 +110,7 @@ async def ingest_meter_reading(deps, file, idempotency_key, principal, trace_id)
     storage = deps.storages.get(policy.storage)
     if storage is None:
         raise HTTPException(501, f"Storage '{policy.storage}' not implemented")
+    metrics.note(storage=storage.name)
 
     repo = deps.meters()  # own connection pool (bulkhead, slice G)
     state, file_id = await repo.claim_reading(
@@ -132,6 +134,10 @@ async def ingest_meter_reading(deps, file, idempotency_key, principal, trace_id)
             content={"error": "duplicate_reading", "file_id": file_id, "trace_id": trace_id, **ident},
         )
     if state == "in_flight":
+        # The same reading is still being stored by another request: this is a duplicate
+        # delivery (the retry will get 409), not a failure of ours, so it must not count as
+        # a server error and trip the error-rate alert during a duplicate burst.
+        metrics.note(outcome="duplicate")
         return JSONResponse(
             status_code=503,
             headers={"Retry-After": "1"},
@@ -155,6 +161,7 @@ async def ingest_meter_reading(deps, file, idempotency_key, principal, trace_id)
         )
         return await _queue(deps, reading, raw, file_id, filename, principal, trace_id,
                             storage.name, ident)
+    metrics.add_bytes(len(raw))
 
     record = FileRecord(
         id=file_id,
@@ -206,6 +213,8 @@ async def _queue(deps, reading, raw, file_id, filename, principal, trace_id, sto
         await _release(deps, reading, file_id)
         raise HTTPException(503, f"Storage '{storage_name}' unavailable",
                             headers={"Retry-After": "2"})
+    metrics.note(outcome="queued")  # accepted (202) but not yet in its storage
+    metrics.add_bytes(len(raw))
     log.warning("reading queued: storage unavailable",
                 extra={"category": CATEGORY, "storage": storage_name, "file_id": file_id, **ident})
     return JSONResponse(

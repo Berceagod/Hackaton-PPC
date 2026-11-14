@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from auth import Principal, require_roles
 from crypto_envelope import DecryptionError, decrypt_stream, encrypt_stream
 from integrity import HashingStream, sha256_of_stream, upload_chunks
+import metrics
 from logging_setup import trace_id_var
 from meter_ingest import ingest_meter_reading
 from policies import CATEGORIES, STORAGES
@@ -74,6 +75,14 @@ async def ingest(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     principal: Principal = Depends(INGEST_ROLES),
 ) -> JSONResponse:
+    # slice H: one observation per request (requests_total, duration, bytes)
+    async with metrics.observe(category, "ingest") as obs:
+        resp = await _ingest_guarded(request, file, category, metadata, idempotency_key, principal)
+        obs.from_response(resp.status_code)
+        return resp
+
+
+async def _ingest_guarded(request, file, category, metadata, idempotency_key, principal) -> JSONResponse:
     deps = request.app.state.deps
     if deps.bulkheads is None or category not in CATEGORIES:
         return await _ingest(request, file, category, metadata, idempotency_key, principal)
@@ -102,6 +111,7 @@ async def _ingest(request, file, category, metadata, idempotency_key, principal)
         return await ingest_meter_reading(deps, file, idempotency_key, principal, trace_id)
 
     policy, storage = await _storage_for(deps, category)
+    metrics.note(storage=storage.name)
     file_id = str(uuid.uuid4())
     key = f"{category}/{file_id}"
 
@@ -116,6 +126,7 @@ async def _ingest(request, file, category, metadata, idempotency_key, principal)
     try:
         await storage.put_stream(key, body)
         size = stream.size  # plaintext size, what the user uploaded and will download
+        metrics.add_bytes(size)
     except StorageError as exc:
         log.error(
             "storage write failed",
@@ -250,23 +261,30 @@ async def verify(
 ) -> dict:
     deps = request.app.state.deps
     rec = await _load_or_404(deps, file_id)
-    ok, actual, reason = await _verify(deps, rec)
-    await deps.repo.add_audit(
-        file_id,
-        "verify",
-        principal.email,
-        trace_id_var.get(),
-        "Verificare integritate: OK (SHA-256)"
-        if ok
-        else f"Verificare integritate: EȘUATĂ ({reason})",
-    )
-    return {
-        "file_id": file_id,
-        "verified": ok,
-        "expected_sha256": rec.sha256,
-        "actual_sha256": actual,
-        "reason": reason or None,
-    }
+    async with metrics.observe(rec.category, "verify") as obs:
+        obs.note(storage=rec.storage)
+        ok, actual, reason = await _verify(deps, rec)
+        if ok:
+            obs.add_bytes(rec.size_bytes)
+        else:
+            metrics.integrity_failure(rec.category, rec.storage, reason)
+            obs.note(outcome="integrity_error")
+        await deps.repo.add_audit(
+            file_id,
+            "verify",
+            principal.email,
+            trace_id_var.get(),
+            "Verificare integritate: OK (SHA-256)"
+            if ok
+            else f"Verificare integritate: EȘUATĂ ({reason})",
+        )
+        return {
+            "file_id": file_id,
+            "verified": ok,
+            "expected_sha256": rec.sha256,
+            "actual_sha256": actual,
+            "reason": reason or None,
+        }
 
 
 @router.get("/files/{file_id}/download")
@@ -277,50 +295,56 @@ async def download(
     rec = await _load_or_404(deps, file_id)
     trace_id = trace_id_var.get()
 
-    # Verify BEFORE delivering any byte: a corrupt file is never served.
-    ok, actual, reason = await _verify(deps, rec)
-    if not ok:
-        log.error(
-            "integrity check failed",
-            extra={
-                "category": rec.category,
-                "storage": rec.storage,
-                "file_id": file_id,
-                "reason": reason,
-            },
-        )
-        await deps.repo.add_audit(
-            file_id,
-            "download_blocked",
-            principal.email,
-            trace_id,
-            f"Descărcare BLOCATĂ: integritate eșuată ({reason})",
-        )
-        return JSONResponse(
-            status_code=409,
-            headers={"X-Integrity-Verified": "false", "X-File-Sha256": rec.sha256},
-            content={
-                "error": "integrity_check_failed",
-                "reason": reason,
-                "file_id": file_id,
-                "expected_sha256": rec.sha256,
-                "actual_sha256": actual,
-            },
-        )
+    async with metrics.observe(rec.category, "download") as obs:
+        obs.note(storage=rec.storage)
 
-    await deps.repo.add_audit(
-        file_id, "download", principal.email, trace_id, "Integritate verificată (SHA-256)"
-    )
-    return StreamingResponse(
-        plaintext_stream(deps, rec),
-        media_type="application/octet-stream",
-        headers={
-            "X-Integrity-Verified": "true",
-            "X-File-Sha256": rec.sha256,
-            "Content-Length": str(rec.size_bytes),
-            "Content-Disposition": _content_disposition(rec.filename),
-        },
-    )
+        # Verify BEFORE delivering any byte: a corrupt file is never served.
+        ok, actual, reason = await _verify(deps, rec)
+        if not ok:
+            log.error(
+                "integrity check failed",
+                extra={
+                    "category": rec.category,
+                    "storage": rec.storage,
+                    "file_id": file_id,
+                    "reason": reason,
+                },
+            )
+            metrics.integrity_failure(rec.category, rec.storage, reason)
+            obs.note(outcome="integrity_error")
+            await deps.repo.add_audit(
+                file_id,
+                "download_blocked",
+                principal.email,
+                trace_id,
+                f"Descărcare BLOCATĂ: integritate eșuată ({reason})",
+            )
+            return JSONResponse(
+                status_code=409,
+                headers={"X-Integrity-Verified": "false", "X-File-Sha256": rec.sha256},
+                content={
+                    "error": "integrity_check_failed",
+                    "reason": reason,
+                    "file_id": file_id,
+                    "expected_sha256": rec.sha256,
+                    "actual_sha256": actual,
+                },
+            )
+
+        await deps.repo.add_audit(
+            file_id, "download", principal.email, trace_id, "Integritate verificată (SHA-256)"
+        )
+        obs.defer()  # a download ends when its last byte is sent, not when we return
+        return StreamingResponse(
+            metrics.counted(obs, plaintext_stream(deps, rec)),
+            media_type="application/octet-stream",
+            headers={
+                "X-Integrity-Verified": "true",
+                "X-File-Sha256": rec.sha256,
+                "Content-Length": str(rec.size_bytes),
+                "Content-Disposition": _content_disposition(rec.filename),
+            },
+        )
 
 
 @router.get("/files/{file_id}/audit")

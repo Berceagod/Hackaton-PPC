@@ -1,0 +1,172 @@
+# Alert rules (slice H). Each business guarantee of PDF section 2.1 has at least one rule
+# that fires BEFORE the guarantee is broken, or the moment it is. Every alert carries:
+#   severity   critical = act now, warning = look soon
+#   guarantee  which promise to the business is at risk
+# Thresholds are plain numbers in the expressions below; change them here and reload.
+
+groups:
+  # ------------------------------------------------------------------ meter readings
+  - name: guarantee-meter-readings        # never lost, never duplicated
+    rules:
+      - alert: MeterReadingsNotArriving
+        # readings were flowing during the last 30 minutes, but none was accepted for 2
+        expr: |
+          sum(rate(filegrid_requests_total{category="meter_readings",operation="ingest",outcome=~"ok|queued"}[2m])) == 0
+          and
+          sum(rate(filegrid_requests_total{category="meter_readings",operation="ingest",outcome=~"ok|queued"}[30m])) > 0
+        for: 1m
+        labels: { severity: critical, guarantee: "meter_readings: never lost" }
+        annotations:
+          summary: "No meter reading accepted for 2 minutes (a gap in the data)"
+          description: "Readings were arriving, now none is accepted. Check the meters/simulator, the gateway and the backend."
+
+      - alert: MeterReadingsLostAtSender
+        # a meter had to throw a reading away: its local backlog was full
+        expr: increase(sim_dropped_total[2m]) > 0
+        labels: { severity: critical, guarantee: "meter_readings: never lost" }
+        annotations:
+          summary: "Meters dropped {{ $value | printf \"%.0f\" }} reading(s): their backlog is full"
+          description: "FileGrid was unreachable for longer than a meter can buffer. Those readings are gone for good."
+
+      - alert: MeterReadingsWaitingAtSender
+        # readings are buffered at the meters because FileGrid refused or could not be reached
+        expr: max(sim_backlog) > 0
+        for: 1m
+        labels: { severity: warning, guarantee: "meter_readings: never lost" }
+        annotations:
+          summary: "{{ $value | printf \"%.0f\" }} reading(s) waiting at the meters for FileGrid"
+          description: "Delivery is delayed. If this keeps growing, meters will start dropping readings."
+
+      - alert: MeterReadingServerErrors
+        expr: |
+          sum(rate(filegrid_requests_total{category="meter_readings",operation="ingest",outcome="server_error"}[2m]))
+          / sum(rate(filegrid_requests_total{category="meter_readings",operation="ingest"}[2m])) > 0.05
+        for: 1m
+        labels: { severity: critical, guarantee: "meter_readings: never lost" }
+        annotations:
+          summary: "More than 5% of meter readings fail with a server error ({{ $value | humanizePercentage }})"
+          description: "Meters will retry, but a sustained failure rate puts readings at risk."
+
+      - alert: MeterOutboxBacklog
+        # readings accepted (202) while their storage was down, not yet written out
+        expr: max(filegrid_outbox_queued) > 0
+        for: 1m
+        labels: { severity: warning, guarantee: "meter_readings: never lost" }
+        annotations:
+          summary: "{{ $value | printf \"%.0f\" }} accepted reading(s) are not yet in their storage"
+          description: "They are safe in the metadata database and will be written out when the storage is back (outbox)."
+
+      - alert: MeterOutboxGrowing
+        expr: max(filegrid_outbox_queued) > 1000
+        for: 2m
+        labels: { severity: critical, guarantee: "meter_readings: never lost" }
+        annotations:
+          summary: "The meter outbox holds {{ $value | printf \"%.0f\" }} readings and is not draining"
+          description: "The storage for meter readings has been unavailable for a long time. Restore it before the metadata database fills up."
+
+      - alert: MeterDuplicateReadingsHigh
+        # duplicates are rejected with 409 (never stored twice); a high share means a sender is retrying wildly
+        expr: |
+          sum(rate(filegrid_requests_total{category="meter_readings",operation="ingest",outcome="duplicate"}[2m]))
+          / sum(rate(filegrid_requests_total{category="meter_readings",operation="ingest"}[2m])) > 0.15
+        for: 30s
+        labels: { severity: warning, guarantee: "meter_readings: never duplicated" }
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of incoming meter readings are duplicates"
+          description: "They are all rejected (HTTP 409) and none is stored twice, but a sender is re-sending the same readings (retry storm, clock reset or replay)."
+
+  # ------------------------------------------------------------------ outage records
+  - name: guarantee-outage-records        # immediately available to dispatchers
+    rules:
+      - alert: OutageRecordIngestSlow
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(filegrid_request_duration_seconds_bucket{category="outage_records",operation="ingest"}[2m]))) > 2
+        for: 1m
+        labels: { severity: critical, guarantee: "outage_records: available immediately" }
+        annotations:
+          summary: "Saving an outage record takes {{ $value | printf \"%.1f\" }} s at p95 (limit 2 s)"
+          description: "A record is acknowledged only after it is stored, so this is how long dispatchers wait for it to exist."
+
+      - alert: OutageRecordDownloadSlow
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(filegrid_request_duration_seconds_bucket{category="outage_records",operation="download"}[2m]))) > 3
+        for: 1m
+        labels: { severity: critical, guarantee: "outage_records: available immediately" }
+        annotations:
+          summary: "Opening an outage record takes {{ $value | printf \"%.1f\" }} s at p95 (limit 3 s)"
+          description: "Dispatchers are waiting for outage records. Look at the storage latency panel."
+
+  # ------------------------------------------------------------------ connection documents
+  - name: guarantee-connection-docs       # personal data protected and auditable
+    rules:
+      - alert: PersonalDataStoredUnencrypted
+        expr: max(filegrid_pii_unencrypted_files) > 0
+        for: 30s
+        labels: { severity: critical, guarantee: "connection_docs: personal data protected" }
+        annotations:
+          summary: "{{ $value | printf \"%.0f\" }} connection document(s) are stored WITHOUT encryption"
+          description: "Someone with direct access to the storage could read personal data. Check the connection_docs policy (encryption must be true) and re-protect or remove the files."
+
+  # ------------------------------------------------------------------ integrity (all categories)
+  - name: guarantee-integrity             # a corrupt file is never served silently
+    rules:
+      - alert: FileIntegrityFailure
+        expr: |
+          sum by (category, storage, reason) (increase(filegrid_integrity_failures_total{reason=~"checksum_mismatch|object_missing|decryption_failed|staging_corrupted"}[5m])) > 0
+        labels: { severity: critical, guarantee: "integrity: a corrupt file is never served" }
+        annotations:
+          summary: "A {{ $labels.category }} file failed its integrity check on {{ $labels.storage }} ({{ $labels.reason }})"
+          description: "The download was blocked (HTTP 409) and nothing corrupt was served. The stored data is damaged or missing: investigate the storage."
+
+  # ------------------------------------------------------------------ drone videos
+  - name: guarantee-drone-videos          # transfer survives slow or unstable links
+    rules:
+      - alert: VideoUploadStalled
+        expr: max(filegrid_uploads_stalled) > 0
+        for: 1m
+        labels: { severity: warning, guarantee: "drone_videos: transfer survives bad links" }
+        annotations:
+          summary: "{{ $value | printf \"%.0f\" }} chunked upload(s) have stalled: no chunk received within the stall threshold (5 min by default)"
+          description: "The upload is resumable: the field team's client should resume it, or it is purged after 24 h. Check the link quality."
+
+  # ------------------------------------------------------------------ platform health
+  - name: platform
+    rules:
+      - alert: StorageCircuitOpen
+        expr: max by (storage) (filegrid_breaker_open) == 1
+        for: 15s
+        labels: { severity: warning, guarantee: "resilience: one storage down must not stop the others" }
+        annotations:
+          summary: "The {{ $labels.storage }} storage keeps failing: its circuit breaker is open"
+          description: "Files for this storage fail fast; other categories are unaffected and meter readings wait in the outbox."
+
+      - alert: StorageErrorRateHigh
+        expr: |
+          sum by (storage) (rate(filegrid_storage_operation_duration_seconds_count{outcome="error"}[2m]))
+          / sum by (storage) (rate(filegrid_storage_operation_duration_seconds_count[2m])) > 0.1
+        for: 1m
+        labels: { severity: warning, guarantee: "resilience: one storage down must not stop the others" }
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of {{ $labels.storage }} operations fail"
+
+      - alert: CategoryAtCapacity
+        expr: sum by (category) (rate(filegrid_bulkhead_rejections_total[2m])) > 0
+        for: 1m
+        labels: { severity: warning, guarantee: "scalability: a spike in one category must not hurt the others" }
+        annotations:
+          summary: "{{ $labels.category }} requests are being refused: the category is at capacity"
+          description: "Its own limit is full (HTTP 503). The other categories are unaffected. Add backend instances or raise its limit."
+
+      - alert: BackendInstanceDown
+        expr: up{job="backend"} == 0
+        for: 30s
+        labels: { severity: critical, guarantee: "availability" }
+        annotations:
+          summary: "A backend instance ({{ $labels.instance }}) cannot be scraped"
+
+      - alert: NoBackendInstances
+        expr: absent(up{job="backend"} == 1)
+        for: 1m
+        labels: { severity: critical, guarantee: "availability" }
+        annotations:
+          summary: "No backend instance is reachable by Prometheus"

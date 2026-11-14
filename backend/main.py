@@ -23,6 +23,7 @@ from storage.s3_storage import S3Storage
 from tracing import TraceMiddleware
 
 # ---- slice H (observability) imports: add directly below this line ----
+import metrics
 
 # ---- slice I (analytics) imports: add directly below this line ----
 
@@ -107,6 +108,7 @@ def create_app(deps: Deps | None = None) -> FastAPI:
                      asyncio.create_task(_purge_loop(app.state.deps, stop))]
 
             # ---- slice H (observability) background tasks: tasks.append(...): add directly below this line ----
+            tasks.append(asyncio.create_task(metrics.run_sampler(app.state.deps, stop)))
 
             # ---- slice I (analytics) background tasks: tasks.append(...): add directly below this line ----
 
@@ -124,6 +126,8 @@ def create_app(deps: Deps | None = None) -> FastAPI:
     app.add_middleware(TraceMiddleware)
 
     # ---- slice H (observability) middleware / app-level routes (e.g. /metrics): add directly below this line ----
+    # Internal only: nginx answers 404 for /metrics and proxies nothing but /api/ (ADR-0014).
+    app.add_api_route("/metrics", metrics.metrics_endpoint, methods=["GET"], include_in_schema=False)
 
     # ---- slice I (analytics) middleware / app-level routes (e.g. /metrics): add directly below this line ----
 

@@ -53,6 +53,8 @@ class Settings:
     upload_ttl_hours: float = 24.0         # abandoned chunked uploads are purged after this
 
     # ---- slice H (observability) settings (always with a default): add directly below this line ----
+    prometheus_sample_seconds: float = 10.0          # how often state gauges are refreshed
+    prometheus_upload_stall_seconds: float = 300.0   # a chunked upload idle this long is "stalled"
 
     # ---- slice I (analytics) settings (always with a default): add directly below this line ----
 
@@ -89,6 +91,10 @@ class Settings:
             upload_ttl_hours=float(os.environ.get("UPLOAD_TTL_HOURS", "24")),
 
             # ---- slice H (observability) from_env lines: add directly below this line ----
+            prometheus_sample_seconds=float(os.environ.get("PROMETHEUS_SAMPLE_SECONDS", "10")),
+            prometheus_upload_stall_seconds=float(
+                os.environ.get("PROMETHEUS_UPLOAD_STALL_SECONDS", "300")
+            ),
 
             # ---- slice I (analytics) from_env lines: add directly below this line ----
 
