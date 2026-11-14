@@ -27,6 +27,8 @@ spec:
             - {name: FTP_HOST, value: ftp}
             - {name: FTP_PORT, value: "21"}
             - {name: POLICIES_PATH, value: /config/policies.yaml}
+            # slice H: one /metrics for both workers of the pod (prometheus_client multiprocess)
+            - {name: PROMETHEUS_MULTIPROC_DIR, value: /tmp/prom_multiproc}
           ports: [{containerPort: 8000, name: http}]
           readinessProbe:
             httpGet: {path: /livez, port: 8000}
@@ -38,8 +40,12 @@ spec:
           resources:
             requests: {cpu: 250m, memory: 192Mi}
             limits: {cpu: "2", memory: 512Mi}
-          volumeMounts: [{name: policies, mountPath: /config, readOnly: true}]
+          volumeMounts:
+            - {name: policies, mountPath: /config, readOnly: true}
+            - {name: prom-multiproc, mountPath: /tmp/prom_multiproc}   # empty at each pod start
       volumes:
+        - name: prom-multiproc
+          emptyDir: {}
         - name: policies
           configMap: {name: filegrid-policies}   # from the repo's policies.yaml (k8s/up.sh)
 ---

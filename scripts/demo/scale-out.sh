@@ -95,6 +95,18 @@ python -c "import sys; sys.exit(0 if $GAIN >= $MIN_GAIN else 1)" \
   || fail "failed uploads: $(field "$R1" errors) / $(field "$RN" errors)"
 echo "$SPREAD" | grep -qE '=0( |$)' && fail "an instance took no traffic: $SPREAD" \
   || ok "every instance took part"
+if docker compose ps --services --status running | grep -qx prometheus; then
+  # slice H x J: Prometheus finds the replicas by DNS on `backend` (refresh 5 s)
+  UP=0
+  for _ in $(seq 1 15); do
+    UP=$(MSYS_NO_PATHCONV=1 docker compose exec -T prometheus wget -qO- \
+      'http://localhost:9090/api/v1/query?query=count(up{job="backend"}==1)' 2>/dev/null \
+      | python -c 'import sys,json;r=json.load(sys.stdin)["data"]["result"];print(r[0]["value"][1] if r else 0)' || echo 0)
+    [ "$UP" = "$N" ] && break; sleep 2
+  done
+  [ "$UP" = "$N" ] && ok "Prometheus scrapes all ${N} instances by itself (job backend, DNS discovery; Grafana: Backend instances up)" \
+    || fail "Prometheus sees ${UP} backend instances, expected ${N}"
+fi
 IMAGES=$(docker compose ps -q backend | xargs docker inspect -f '{{.Image}}' | sort -u | wc -l)
 [ "$IMAGES" = "1" ] && ok "all ${N} instances run the same image (nothing rebuilt, no code changed)" \
   || fail "instances run $IMAGES different images"
