@@ -25,6 +25,7 @@ from tracing import TraceMiddleware
 # ---- slice H (observability) imports: add directly below this line ----
 
 # ---- slice I (analytics) imports: add directly below this line ----
+from routes.analytics import router as analytics_router
 
 # ---- slice J (scale-out) imports: add directly below this line ----
 
@@ -139,6 +140,7 @@ def create_app(deps: Deps | None = None) -> FastAPI:
         # ---- slice H (observability) routers under /api/v1: add directly below this line ----
 
         # ---- slice I (analytics) routers under /api/v1: add directly below this line ----
+        app.include_router(analytics_router, prefix=prefix)
 
         # ---- slice J (scale-out) routers under /api/v1: add directly below this line ----
     return app

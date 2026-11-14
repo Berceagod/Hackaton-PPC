@@ -228,6 +228,32 @@ class FakeRepo:
 
     # ---- slice I (analytics) FakeRepo methods: add directly below this line ----
 
+    def _analytics_store(self):
+        if not hasattr(self, "_measurements"):
+            self._measurements = []
+
+    async def ensure_analytics_schema(self):
+        self._analytics_store()
+
+    async def save_measurements(self, kind, scenario, rows):
+        self._analytics_store()
+        for row in rows:
+            self._measurements.append({"kind": kind, "scenario": scenario, **row})
+
+    async def latest_measurements(self):
+        self._analytics_store()
+        latest = {}
+        for row in self._measurements:
+            key = (row["kind"], row.get("scenario") or "", row["category"], row["storage"])
+            latest[key] = row
+        return list(latest.values())
+
+    async def analytics_snapshot(self):
+        from analytics import snapshot_from_memory
+
+        self._analytics_store()
+        return snapshot_from_memory(self.files, self.readings, self.audit)
+
     # ---- slice J (scale-out) FakeRepo methods: add directly below this line ----
 
 

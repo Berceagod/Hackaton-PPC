@@ -55,6 +55,9 @@ class Settings:
     # ---- slice H (observability) settings (always with a default): add directly below this line ----
 
     # ---- slice I (analytics) settings (always with a default): add directly below this line ----
+    prometheus_url: str = "http://prometheus:9090"  # slice H; summary still answers if this is down
+    analytics_range: str = "5m"                     # PromQL window for the live table
+    analytics_timeout_seconds: float = 2.0
 
     # ---- slice J (scale-out) settings (always with a default): add directly below this line ----
 
@@ -91,6 +94,9 @@ class Settings:
             # ---- slice H (observability) from_env lines: add directly below this line ----
 
             # ---- slice I (analytics) from_env lines: add directly below this line ----
+            prometheus_url=os.environ.get("PROMETHEUS_URL", "http://prometheus:9090"),
+            analytics_range=os.environ.get("ANALYTICS_RANGE", "5m"),
+            analytics_timeout_seconds=float(os.environ.get("ANALYTICS_TIMEOUT_SECONDS", "2")),
 
             # ---- slice J (scale-out) from_env lines: add directly below this line ----
             users={
