@@ -12,7 +12,9 @@ import asyncio
 import hashlib
 import logging
 
+import metrics
 from crypto_envelope import encrypt_stream
+from logging_setup import trace_id_var
 from meter_ingest import CATEGORY, reading_key
 from repo import FileRecord
 from storage.base import StorageError
@@ -43,26 +45,35 @@ async def drain_once(deps, retry_after: float = RETRY_AFTER_SECONDS, batch: int 
         key = reading_key(row["meter_id"], row["reading_ts"])
         body = (encrypt_stream(_one(raw), deps.settings.master_key, file_id)
                 if policy.encryption else _one(raw))
+        # Slice H: the drain is an operation of its own ("drain"), and its storage-span logs
+        # carry the ORIGINAL request's trace id, so one trace id tells the whole story of a
+        # reading that was accepted during an outage and written out minutes later.
+        token = trace_id_var.set(row["trace_id"] or "-")
         try:
-            await storage.put_stream(key, body)
+            async with metrics.observe(CATEGORY, "drain") as obs:
+                obs.note(storage=storage.name)
+                await storage.put_stream(key, body)
+                await repo.complete_reading(row["meter_id"], row["reading_ts"], FileRecord(
+                    id=file_id,
+                    filename=row["filename"] or f"{row['meter_id']}.json",
+                    category=CATEGORY,
+                    storage=storage.name,
+                    storage_key=key,
+                    size_bytes=len(raw),
+                    sha256=hashlib.sha256(raw).hexdigest(),
+                    encrypted=policy.encryption,
+                    trace_id=row["trace_id"],  # the original request's trace: one story end to end
+                    zone=row["zone"],
+                    uploaded_by=row["uploaded_by"],
+                ))
+                obs.add_bytes(len(raw))
         except StorageError as exc:
             # still down: this and the rest of the batch are retried after retry_after
             log.warning("storage still down; readings stay queued",
                         extra={"storage": storage.name, "error": str(exc)})
             break
-        await repo.complete_reading(row["meter_id"], row["reading_ts"], FileRecord(
-            id=file_id,
-            filename=row["filename"] or f"{row['meter_id']}.json",
-            category=CATEGORY,
-            storage=storage.name,
-            storage_key=key,
-            size_bytes=len(raw),
-            sha256=hashlib.sha256(raw).hexdigest(),
-            encrypted=policy.encryption,
-            trace_id=row["trace_id"],  # the original request's trace: one story end to end
-            zone=row["zone"],
-            uploaded_by=row["uploaded_by"],
-        ))
+        finally:
+            trace_id_var.reset(token)
         stored += 1
     if stored:
         log.info("queued readings stored", extra={"count": stored})

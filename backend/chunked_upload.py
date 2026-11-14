@@ -12,12 +12,14 @@ size is, and any backend replica can take any chunk (no local disk, no sticky se
 import json
 import logging
 import re
+import time
 import uuid
 from dataclasses import dataclass
 
 from fastapi import HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
+import metrics
 from crypto_envelope import DecryptionError, decrypt_stream, encrypt_stream
 from integrity import HashingStream, upload_chunks
 from policies import CATEGORIES
@@ -188,12 +190,14 @@ async def receive_chunk(deps, principal, trace_id: str, req: ChunkRequest,
     try:
         await staging.put_stream(key, body)
         size = stream.size
+        metrics.add_bytes(size)
     except ChunkTooLarge:
         await _delete(staging, key)
         raise _bad("chunk_too_large", f"Chunk larger than {MAX_CHUNK_BYTES} bytes", 413) from None
     except StorageError as exc:
         raise _retry_later(f"Staging storage unavailable: {exc}") from exc
     if req.chunk_sha256 and stream.hexdigest != req.chunk_sha256:
+        metrics.integrity_failure(req.category, STAGING_STORAGE, "chunk_checksum_mismatch")
         await _delete(staging, key)
         raise _bad("chunk_checksum_mismatch", "Chunk corrupted in transit; resend it")
 
@@ -206,6 +210,14 @@ async def receive_chunk(deps, principal, trace_id: str, req: ChunkRequest,
 
 async def _assemble(deps, principal, trace_id, session, policy, target, staging):
     upload_id, total = session["id"], session["total_chunks"]
+    started = time.perf_counter()
+
+    def done(outcome: str, nbytes: int = 0) -> None:
+        # The finished file is one "ingest" on the storage the policy chose (slice H); the
+        # chunks that built it were recorded one by one as "chunk" on the staging storage.
+        metrics.record(session["category"], target.name, "ingest", outcome,
+                       time.perf_counter() - started, nbytes)
+
     if not await deps.repo.start_assembly(upload_id, ASSEMBLY_STALE_SECONDS):
         current = await deps.repo.get_upload(upload_id)
         if current and current["status"] == "complete":
@@ -236,12 +248,15 @@ async def _assemble(deps, principal, trace_id, session, policy, target, staging)
         await _delete(target, final_key)
         await _delete_staging(staging, upload_id, total)
         await deps.repo.fail_upload(upload_id, "staging_corrupted")
+        metrics.integrity_failure(session["category"], STAGING_STORAGE, "staging_corrupted")
+        done("integrity_error")
         log.error("staged chunk failed authentication", extra={"upload_id": upload_id})
         return JSONResponse(status_code=409, content={"detail": {
             "error": "upload_failed", "message": "A staged chunk was altered; start a new upload"}})
     except StorageError as exc:
         # chunks stay staged: resending the last chunk retries the assembly
         await deps.repo.reopen_upload(upload_id)
+        done("server_error")
         log.error("assembly failed", extra={"upload_id": upload_id, "storage": target.name,
                                             "error": str(exc)})
         raise _retry_later(f"Storage '{target.name}' unavailable") from exc
@@ -250,6 +265,10 @@ async def _assemble(deps, principal, trace_id, session, policy, target, staging)
         await _delete(target, final_key)
         await _delete_staging(staging, upload_id, total)
         await deps.repo.fail_upload(upload_id, error)
+        if error == "file_checksum_mismatch":  # damaged between the client and us
+            metrics.integrity_failure(session["category"], target.name, error)
+        done({"file_checksum_mismatch": "integrity_error", "duplicate_file": "duplicate"}
+             .get(error, "client_error"), size)
         log.error("upload rejected", extra={"upload_id": upload_id, "reason": error})
         detail = {"error": error, "message": message, **(extra or {})}
         return JSONResponse(status_code=status, content={"detail": detail})
@@ -288,7 +307,9 @@ async def _assemble(deps, principal, trace_id, session, policy, target, staging)
     except Exception:
         await _delete(target, final_key)
         await deps.repo.reopen_upload(upload_id)
+        done("server_error", size)
         raise
+    done("ok", size)
     await deps.repo.add_audit(
         file_id, "upload", principal.email, trace_id,
         f"Upload pe bucăți ({total} bucăți) {session['category']} → {target.name}",

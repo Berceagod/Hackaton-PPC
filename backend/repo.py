@@ -179,6 +179,8 @@ class Repo(Protocol):
     async def delete_upload(self, upload_id: str) -> None: ...
 
     # ---- slice H (observability) Repo protocol methods: add directly below this line ----
+    async def count_unencrypted_pii(self) -> int: ...
+    async def upload_stall_stats(self, stall_seconds: float) -> tuple[int, int]: ...
 
     # ---- slice I (analytics) Repo protocol methods: add directly below this line ----
 
@@ -590,6 +592,27 @@ class PostgresRepo:
             return False
 
     # ---- slice H (observability) PostgresRepo methods: add directly below this line ----
+    async def count_unencrypted_pii(self) -> int:
+        """connection_docs files stored without encryption: personal data at risk (alert)."""
+        async with self._pool.acquire() as con:
+            return int(
+                await con.fetchval(
+                    "SELECT count(*) FROM files_metadata "
+                    "WHERE category = 'connection_docs' AND NOT encrypted"
+                )
+            )
+
+    async def upload_stall_stats(self, stall_seconds: float) -> tuple[int, int]:
+        """(in progress, stalled): chunked uploads still open or assembling, and those with
+        no chunk received for longer than `stall_seconds` (updated_at moves with every chunk)."""
+        async with self._pool.acquire() as con:
+            row = await con.fetchrow(
+                "SELECT count(*) AS in_progress, "
+                "count(*) FILTER (WHERE updated_at < now() - make_interval(secs => $1)) AS stalled "
+                "FROM upload_sessions WHERE status IN ('open', 'assembling')",
+                float(stall_seconds),
+            )
+        return int(row["in_progress"]), int(row["stalled"])
 
     # ---- slice I (analytics) PostgresRepo methods: add directly below this line ----
 

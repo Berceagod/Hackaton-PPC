@@ -225,6 +225,15 @@ class FakeRepo:
         return True
 
     # ---- slice H (observability) FakeRepo methods: add directly below this line ----
+    stall_stats = (0, 0)  # (in progress, stalled); tests set it
+
+    async def count_unencrypted_pii(self):
+        return sum(
+            1 for r in self.files.values() if r.category == "connection_docs" and not r.encrypted
+        )
+
+    async def upload_stall_stats(self, stall_seconds):
+        return self.stall_stats
 
     # ---- slice I (analytics) FakeRepo methods: add directly below this line ----
 
@@ -313,6 +322,32 @@ def auth(client):
 
 
 # ---- slice H (observability) fixtures: add directly below this line ----
+@pytest.fixture
+def metric():
+    """Current value of a Prometheus sample, e.g. metric("filegrid_requests_total", category=...).
+    The registry lives for the whole test run, so tests compare before/after values."""
+    from prometheus_client import REGISTRY
+
+    def value(name, **labels):
+        return REGISTRY.get_sample_value(name, labels) or 0.0
+
+    return value
+
+
+@pytest.fixture
+def breaker_client(storage, pg_storage, ftp_storage, repo, policies):
+    """Like `client`, but every storage sits behind the circuit breaker (as in production),
+    which is where storage-call timings are recorded."""
+    from storage.breaker import BreakerStorage
+
+    storages = {
+        "s3": BreakerStorage(storage),
+        "postgres": BreakerStorage(pg_storage),
+        "ftp": BreakerStorage(ftp_storage),
+    }
+    app = create_app(Deps(SETTINGS, repo, storages, policies))
+    with TestClient(app) as c:
+        yield c
 
 # ---- slice I (analytics) fixtures: add directly below this line ----
 
