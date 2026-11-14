@@ -6,6 +6,7 @@
 # Usage: scripts/demo/duplicate-reading.sh [burst_size]   (default 200)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+source scripts/lib/env.sh
 
 BASE="${BASE:-https://localhost/api/v1}"
 BURST="${1:-200}"
@@ -69,7 +70,7 @@ FID=$(sql "select file_id from meter_readings where meter_id='$METER'")
 CODE=$($CURL -o /dev/null -w '%{http_code}' "$BASE/files/$FID/download" -H "Authorization: Bearer $SIM_TOKEN")
 [ "$CODE" = "403" ] && ok "the simulator token cannot download (403): it may only ingest" || fail "service token download got $CODE"
 USER_TOKEN=$($CURL -X POST "$BASE/auth/login" -H 'Content-Type: application/json' \
-  -d '{"email":"dispecer@ppc.ro","password":"dispecer"}' | python -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+  -d "{\"email\":\"dispecer@ppc.ro\",\"password\":\"$(env_value DISPECER_PASSWORD)\"}" | python -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 $CURL -D "$TMP/h" -o "$TMP/out.json" "$BASE/files/$FID/download" -H "Authorization: Bearer $USER_TOKEN"
 cmp "$TMP/r.json" "$TMP/out.json" && ok "download byte-identical"
 grep -qi '^x-integrity-verified: true' "$TMP/h" && ok "X-Integrity-Verified: true" || fail "integrity header missing"

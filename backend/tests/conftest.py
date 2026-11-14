@@ -52,6 +52,49 @@ class FakeRepo:
         self.files: dict[str, FileRecord] = {}
         self.audit: list[dict] = []
         self.readings: dict[tuple, dict] = {}
+        self.uploads: dict[str, dict] = {}
+        self.upload_chunks: dict[str, dict[int, dict]] = {}
+
+    # ---- chunked uploads (mirrors PostgresRepo semantics) ----
+    async def open_upload(self, session):
+        if session["id"] not in self.uploads:
+            self.uploads[session["id"]] = {
+                **session, "status": "open", "file_id": None, "reason": None,
+                "updated_at": time.time(),
+            }
+            self.upload_chunks[session["id"]] = {}
+        else:
+            self.uploads[session["id"]]["updated_at"] = time.time()  # activity keeps it alive
+        return dict(self.uploads[session["id"]])
+
+    async def get_upload(self, upload_id):
+        row = self.uploads.get(upload_id)
+        return dict(row) if row else None
+
+    async def record_chunk(self, upload_id, index, size, sha256):
+        self.upload_chunks[upload_id][index] = {"size": size, "sha256": sha256}
+        return len(self.upload_chunks[upload_id])
+
+    async def received_chunks(self, upload_id):
+        return sorted(self.upload_chunks.get(upload_id, {}))
+
+    async def start_assembly(self, upload_id, stale_after):
+        row = self.uploads[upload_id]
+        stale = row["status"] == "assembling" and time.time() - row["updated_at"] > stale_after
+        if row["status"] == "open" or stale:
+            row["status"], row["updated_at"] = "assembling", time.time()
+            return True
+        return False
+
+    async def complete_upload(self, upload_id, rec):
+        self.files[rec.id] = rec
+        self.uploads[upload_id].update(status="complete", file_id=rec.id)
+
+    async def reopen_upload(self, upload_id):
+        self.uploads[upload_id]["status"] = "open"
+
+    async def fail_upload(self, upload_id, reason):
+        self.uploads[upload_id].update(status="failed", reason=reason)
 
     async def init_schema(self):
         pass
@@ -107,9 +150,10 @@ class FakeRepo:
         key = (claim["meter_id"], claim["reading_ts"])
         row = self.readings.get(key)
         if row is None:
-            self.readings[key] = {**claim, "status": "pending", "claimed_at": time.time()}
+            self.readings[key] = {**claim, "status": "pending", "claimed_at": time.time(),
+                                  "raw": None, "filename": None, "uploaded_by": None}
             return "new", claim["file_id"]
-        if row["status"] == "stored":
+        if row["status"] in ("stored", "queued"):  # queued = durably accepted (slice G)
             return "duplicate", row["file_id"]
         if time.time() - row["claimed_at"] > stale_after:
             row["claimed_at"] = time.time()
@@ -118,7 +162,40 @@ class FakeRepo:
 
     async def complete_reading(self, meter_id, reading_ts, rec):
         self.files[rec.id] = rec
-        self.readings[(meter_id, reading_ts)]["status"] = "stored"
+        row = self.readings[(meter_id, reading_ts)]
+        row["status"], row["raw"] = "stored", None
+
+    # ---- meter outbox (slice G) ----
+    async def queue_reading(self, meter_id, reading_ts, raw, filename, uploaded_by):
+        row = self.readings[(meter_id, reading_ts)]
+        if row["status"] != "pending":
+            return False
+        row.update(status="queued", raw=raw, filename=filename, uploaded_by=uploaded_by,
+                   claimed_at=time.time())
+        return True
+
+    async def claim_queued(self, limit, retry_after):
+        now, out = time.time(), []
+        for row in self.readings.values():
+            if row["status"] == "queued" and now - row["claimed_at"] >= retry_after:
+                row["claimed_at"] = now
+                out.append(dict(row))
+                if len(out) == limit:
+                    break
+        return out
+
+    async def count_queued(self):
+        return sum(1 for r in self.readings.values() if r["status"] == "queued")
+
+    # ---- stale chunked uploads (slice G) ----
+    async def list_stale_uploads(self, older_than_seconds):
+        cutoff = time.time() - older_than_seconds
+        return [(u["id"], u["total_chunks"]) for u in self.uploads.values()
+                if u["status"] in ("open", "failed") and u["updated_at"] < cutoff]
+
+    async def delete_upload(self, upload_id):
+        self.uploads.pop(upload_id, None)
+        self.upload_chunks.pop(upload_id, None)
 
     async def release_reading(self, meter_id, reading_ts, file_id):
         row = self.readings.get((meter_id, reading_ts))
@@ -162,6 +239,7 @@ SETTINGS = Settings(
     ftp_port=21,
     ftp_user="u",
     ftp_password="p",
+    master_key=bytes(range(32)),
     users={
         "dispecer@ppc.ro": {"password": "pw-d", "role": "dispecer", "name": "D"},
         "admin@ppc.ro": {"password": "pw-a", "role": "admin", "name": "A"},
@@ -210,6 +288,14 @@ def client(storage, pg_storage, ftp_storage, repo, policies):
     app = create_app(Deps(SETTINGS, repo, storages, policies))
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture
+def admin(client):
+    token = client.post(
+        "/api/v1/auth/login", json={"email": "admin@ppc.ro", "password": "pw-a"}
+    ).json()["token"]
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture

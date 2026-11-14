@@ -3,6 +3,7 @@
 
 x-backend-env: &backend-env
   DATABASE_URL: postgresql://filegrid:${POSTGRES_META_PASSWORD:?run ./start.sh}@postgres-meta:5432/filegrid
+  UVICORN_WORKERS: ${UVICORN_WORKERS:-4}   # backend processes per container (slice G)
   S3_ENDPOINT: http://minio:9000
   S3_ACCESS_KEY: ${MINIO_ROOT_USER:?run ./start.sh}
   S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?run ./start.sh}
@@ -16,6 +17,7 @@ x-backend-env: &backend-env
   SIMULATOR_TOKEN: ${SIMULATOR_TOKEN:?run ./start.sh}
   DISPECER_PASSWORD: ${DISPECER_PASSWORD:?run ./start.sh}
   ADMIN_PASSWORD: ${ADMIN_PASSWORD:?run ./start.sh}
+  FILEGRID_MASTER_KEY: ${FILEGRID_MASTER_KEY:?run ./start.sh}
   POLICIES_PATH: /app/policies.yaml
 
 services:
@@ -31,7 +33,12 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+      toxiproxy:
+        condition: service_healthy
     volumes:
+      # key pair survives container re-creation (rebuild, up --build): a new cert on every
+      # restart broke the simulator's pinned CA and it dropped readings (ADR-0003)
+      - gateway-certs:/etc/nginx/certs
       - gateway-ca:/etc/nginx/ca      # public cert only (see 40-gen-cert.sh)
     networks: [edge, internal]
     restart: unless-stopped
@@ -57,9 +64,30 @@ services:
     networks: [internal]
     restart: unless-stopped
 
+  # Network-fault injector between the gateway and the backend (slice G). With no toxics it
+  # passes traffic through unchanged; scripts/chaos/network-bad.sh adds latency, a bandwidth
+  # cap and dropped connections to show transfers finish or resume (PDF §4 Reziliență).
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./infrastructure/toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [internal]
+    restart: unless-stopped
+
   backend:
     build: ./backend
     environment: *backend-env
+    # Hard cap: a 1 GB+ upload must pass through a 512 MB container (streaming, slice E)
+    mem_limit: 512m
     volumes:
       - ./policies.yaml:/app/policies.yaml:ro
     depends_on:
@@ -142,6 +170,7 @@ networks:
     internal: true   # no route to/from the host: storages are unreachable from outside
 
 volumes:
+  gateway-certs: {}   # nginx TLS key pair; only the nginx container mounts it
   gateway-ca: {}
   pgmeta: {}
   pgblob: {}

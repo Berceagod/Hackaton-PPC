@@ -115,7 +115,7 @@ def test_parse_rejects_empty_document():
 
 def test_degraded_health_stays_200_when_one_storage_down(client, ftp_storage):
     ftp_storage.down = True
-    r = client.get("/api/v1/health")
+    r = client.get("/health")  # internal path; /api/v1/health needs a user (slice D)
     assert r.status_code == 200
     assert r.json()["status"] == "degraded"
     assert r.json()["checks"]["ftp"] is False

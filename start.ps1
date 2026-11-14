@@ -33,8 +33,15 @@ Ensure FTP_USER filegrid
 Ensure FTP_PASSWORD (Rand)
 Ensure JWT_SECRET ((Rand) + (Rand))
 Ensure SIMULATOR_TOKEN (Rand)
-Ensure DISPECER_PASSWORD dispecer
-Ensure ADMIN_PASSWORD admin
+# AES-256 master key for personal data at rest (ADR-0011). Back up .env: without this key
+# encrypted documents cannot be read. Never commit it.
+Ensure FILEGRID_MASTER_KEY (Rand)
+# UI accounts get random passwords (no password lives in the repository, ADR-0012).
+# Installations created before this change used the literal demo passwords: replace them.
+$envLines = Get-Content -LiteralPath .env | Where-Object { $_ -ne "DISPECER_PASSWORD=dispecer" -and $_ -ne "ADMIN_PASSWORD=admin" }
+Set-Content -LiteralPath .env -Value $envLines -Encoding ascii
+Ensure DISPECER_PASSWORD ((Rand).Substring(0, 16))
+Ensure ADMIN_PASSWORD ((Rand).Substring(0, 16))
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Host "Docker is not installed. Install Docker Desktop, start it, then re-run .\start.ps1" -ForegroundColor Red
@@ -75,20 +82,26 @@ if ($proc.ExitCode -ne 0) {
     exit $proc.ExitCode
 }
 
-Write-Host ">> Waiting for the gateway to become healthy"
+Write-Host ">> Waiting for FileGrid to come up"
 for ($i = 0; $i -lt 90; $i++) {
-    $body = cmd /c "curl.exe -sk --max-time 3 https://localhost/api/v1/health 2>NUL"
-    if ($body -match '"status"\s*:\s*"(ok|degraded)"') {
+    # /api/v1/livez is public and reveals nothing; the storage report needs a login (slice D)
+    $body = cmd /c "curl.exe -sk --max-time 3 https://localhost/api/v1/livez 2>NUL"
+    if ($body -match '"status"\s*:\s*"alive"') {
+        $pwD = ((Select-String -Path .env -Pattern '^DISPECER_PASSWORD=').Line -split '=', 2)[1]
+        $pwA = ((Select-String -Path .env -Pattern '^ADMIN_PASSWORD=').Line -split '=', 2)[1]
         Write-Host ""
         Write-Host "FileGrid is up:  https://localhost   (self-signed certificate)"
-        Write-Host "Login:           dispecer@ppc.ro / dispecer   or   admin@ppc.ro / admin"
-        if ($body -match '"status"\s*:\s*"degraded"') {
-            Write-Host "Note: /health is degraded (a storage may still be starting)."
+        Write-Host "Login:           dispecer@ppc.ro / $pwD"
+        Write-Host "                 admin@ppc.ro    / $pwA"
+        Write-Host "                 (generated for this machine, stored only in .env)"
+        $deps = cmd /c "docker compose exec -T backend python -c ""import urllib.request as u; print(u.urlopen('http://127.0.0.1:8000/health', timeout=10).read().decode())"" 2>NUL"
+        if ($deps -match '"status"\s*:\s*"degraded"') {
+            Write-Host "Note: a storage is still starting or down: $deps"
         }
         exit 0
     }
     Start-Sleep -Seconds 2
 }
 
-Write-Host "Timed out waiting for health. Check: docker compose ps ; docker compose logs nginx ; docker compose logs backend" -ForegroundColor Red
+Write-Host "Timed out waiting for FileGrid. Check: docker compose ps ; docker compose logs nginx ; docker compose logs backend" -ForegroundColor Red
 exit 1

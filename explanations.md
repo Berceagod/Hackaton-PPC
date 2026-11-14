@@ -44,6 +44,58 @@ Add a section for each feature when it lands. Format: **What / Why / How / How t
 **Prove it:** `scripts/demo/duplicate-reading.sh` (re-sends 200 stored readings: all 409 and the row count does not move; sends one new reading 40 times in parallel: one `202`, one row). `scripts/sim.sh mode storm` raises the rate 10x. Unit tests: `tests/test_slice_c.py`.
 **Limits today:** if the meter storage is down for longer than the simulator's own retries (about 6 s), the simulator drops the reading. Accepting and queueing readings during an outage is slice G.
 
+## Slice D — roles, audit, real file list, frontend on the real backend
+**What:** the React UI runs against the real API (mock off): login, upload, list/search/filter, integrity-checked download, audit and policies all go through `https://localhost/api/v1`. Access is role based, and the public surface reveals nothing to anonymous callers.
+**Why:** PDF hard rule 6 (UI to upload/search/download), §4 "access to FileGrid is authenticated", and the "connection docs auditable" guarantee.
+**How it works:**
+- Three roles. `admin` and `dispecer` log in (`POST /auth/login`, HS256 JWT, 24 h). The simulator uses `SIMULATOR_TOKEN` (role `service`) and may only send meter readings: if it leaked, it could not read any file. Only `admin` may change policies; the UI shows the Policies page read-only to a dispecer.
+- JWTs are checked strictly: algorithm fixed to HS256 (no `none`, no algorithm chosen by the token), `exp/sub/role` required, unknown role -> 403. On any 401 the UI drops the session and returns to the login screen.
+- `GET /files`: newest first, filters `category`, `storage`, search `q` (filename, trace id, zone), `limit`/`offset`. Meter readings are left out unless asked for (`category=meter_readings` or a search), so ~36,000 readings/hour do not bury manual uploads.
+- Audit: every upload, download, verify and *blocked* download (corrupt file) is a row in `audit_logs` with user, time and trace id. The UI understands upload/download; the exact event is in `event`.
+- Downloads send `Content-Disposition` per RFC 6266 (ASCII `filename` + UTF-8 `filename*`): a name like `raport_întrerupere_ștație.pdf` used to crash the response with a 500.
+- Health: `/livez` (process alive, used by Docker) and `/health` (per-storage report) are open only on the internal network. Through nginx, `/api/v1/health` needs a logged-in user; the header badge polls it (Online / Degradat / Offline).
+- The gateway's TLS key pair is kept in the `gateway-certs` volume, so re-creating nginx keeps the certificate the simulator trusts (before, every rebuild silently made the simulator drop readings).
+**Prove it:** `cd backend && pytest -q tests` (`tests/test_slice_d.py`); in the browser log in as dispecer -> Policies shows "Doar citire"; upload a PDF with diacritics in its name and download it; `curl -k https://localhost/api/v1/health` -> 401; `docker compose up -d --force-recreate nginx` then `scripts/sim.sh status` -> `failed` stays 0.
+**Not yet:** chunked upload for files > 5 MB (slice E), encrypted connection_docs (F), analytics endpoint (I).
+
+## Slice E — chunked, resumable uploads; files > 1 GB on flat memory
+**What:** drone videos and any file over 5 MB go up in 5 MB chunks. Each chunk is verified and stored as it arrives; a broken transfer resumes by sending only the missing chunks; the server assembles the file into the storage the policy names. A 1.2 GB file passes through a backend capped at 512 MB.
+**Why:** PDF §4 "files > 1 GB without the service's resources growing with the size", "transfers finish or resume on slow/unstable links", and the drone-video guarantee in §2.1.
+**How it works** (`backend/chunked_upload.py`, ADR-0010):
+- `POST /upload/chunk` carries `upload_id` (UUID chosen by the browser), the chunk index/total, the file's name/category/metadata and optionally the whole-file `sha256`/`size_bytes` and the chunk's own `chunk_sha256`.
+- The chunk is streamed (64 KB reads) to S3 as `_staging/<upload_id>/<index>` and recorded in `upload_chunks`. Same index again = same key and row, so retries never duplicate. A chunk whose SHA-256 differs from `chunk_sha256` is thrown away (422) and the client resends it. Chunks may arrive in any order and on any backend replica.
+- `GET /upload/{id}` lists `received` and `missing` chunks, so a client that lost its connection resends only what is missing.
+- When the last missing chunk lands, exactly one request wins the `open -> assembling` status change in the database and streams the chunks in order into the target storage (S3 multipart, FTP or Postgres), computing SHA-256 on the way. If the client declared a size or SHA and it does not match, nothing is kept. If the target storage is down, the chunks stay staged and resending the last chunk retries. Then the file row, the session's `complete` status and an audit entry are written, and the staging copies are deleted. A chunk resent after that gets the same answer.
+- The browser no longer hashes a > 512 MB file in memory (it cannot do so in pieces); every chunk is still verified and the server hashes the whole file.
+**Prove it:** `scripts/demo/large-file-1gb.sh` (default 1200 MB): uploads all chunks but one, shows the server reporting it missing, resends it, compares SHA-256 and the downloaded bytes, and prints the backend's memory (78 -> 107 MiB under a 512 MB limit). Unit tests: `tests/test_slice_e.py`.
+**Not yet:** cleanup of abandoned uploads; resume after a browser page reload in the UI; toxiproxy bad-network demo (slice G).
+
+## Slice F — encryption at rest and security hardening
+**What:** personal data (connection documents, and any category whose policy says `encryption: true`) is encrypted with AES-256-GCM inside the backend before it reaches FTP, S3 or Postgres; storages cannot be reached from outside; no password or key lives in the repository; login is rate limited.
+**Why:** PDF §4 Security (storages only reachable through FileGrid; unauthorized direct storage access exposes no personal data; no password or key in the repo) and the §2.1 guarantee for connection documents. It also unblocks hard rule 1: all four categories are now stored and retrieved.
+**How it works:**
+- `crypto_envelope.py` encrypts in 64 KB segments, each sealed with AES-256-GCM. The segment number and a "last segment" flag are bound into each seal, so cutting, reordering, flipping a bit or moving the ciphertext to another file is detected before any byte is released. Memory stays one segment, so 1 GB documents still stream.
+- Each file has its own key, derived (HKDF-SHA256) from the master key and the file id. The master key is 32 random bytes generated by the start script into `.env` and given only to the backend container. A stolen storage or metadata database decrypts nothing.
+- Upload, download, verify, chunked upload (whose temporary chunks are encrypted too) and meter readings all go through it when the policy asks. The SHA-256 the user sees is that of the original file; a tampered ciphertext gives `409 decryption_failed` and an audit entry.
+- Network: only nginx publishes ports; every storage lives on an `internal: true` Docker network. nginx sends HSTS, nosniff, X-Frame-Options and Referrer-Policy and limits login to 20 attempts/minute per IP.
+- Secrets: `.env` holds everything secret and is git-ignored. The UI passwords are random per machine and printed by `start.sh` / `start.ps1`. `secrets-scan.sh` runs gitleaks over the history and the working tree.
+**Prove it:** `scripts/demo/unauthorized-direct-storage-access.sh` (ports closed; storages unreachable from the public network; on each storage the raw connection document has no CNP/name while a plain outage record does; FileGrid returns the exact original; the key is only in the backend). `scripts/security/secrets-scan.sh`. Unit tests: `tests/test_slice_f.py`.
+**Not yet:** key rotation; Kubernetes NetworkPolicy (slice J).
+
+## Slice G — isolation between categories and resilience to failures
+**What:** a 10x spike in one category does not slow the others; a storage going down stops nothing else and loses no confirmed file; uploads and meter readings get through a slow, lossy network by themselves, never duplicated.
+**Why:** PDF §4 Scalabilitate (10x spike) and Reziliență (storage down, bad network, retries without duplicates).
+**How it works:**
+- *Outbox for meter readings* (`meter_outbox.py`): if the reading's storage is down, its exact bytes are kept in the metadata DB as `queued` and the meter gets 202. A worker writes queued readings out as soon as the storage answers again, then they are `stored` like any other. Nothing confirmed is ever lost; a resend is a 409.
+- *Circuit breaker* per storage: after 3 failures in a row calls fail immediately for 5 s instead of waiting on timeouts, so a dead storage does not hold request slots.
+- *Bulkheads*: every category has its own concurrency limit (by policy priority) and meter readings have their own DB connection pool; the backend runs 4 worker processes so CPU-heavy uploads cannot starve other categories.
+- *Policy changes* are pushed to every worker at once with Postgres NOTIFY.
+- *Meters keep what they could not send*: the simulator stores undelivered readings in a backlog and resends them until FileGrid confirms.
+- *Bad network*: toxiproxy between nginx and the backend can add latency, cap bandwidth and cut connections on demand.
+- Abandoned chunked uploads are deleted after 24 h without activity.
+**Prove it:** `scripts/demo/kill-storage.sh`, `scripts/demo/spike-10x.sh`, `scripts/demo/slow-network.sh`; unit tests `tests/test_slice_g.py`.
+**Not yet:** queueing for UI categories when their storage is down (they get 503 and retry); a persistent simulator backlog.
+
 ## Documentation
 Documentation written before code:
 - `docs/SPEC.md` — requirement-to-proof traceability matrix (status of every PDF requirement).

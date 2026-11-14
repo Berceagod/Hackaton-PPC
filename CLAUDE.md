@@ -21,10 +21,10 @@ Non-functional (must be demonstrable live): a 10x spike in one category does not
 Business guarantees: meter readings never lost/duplicated; outage records immediately available; connection docs PII-protected and auditable; drone videos survive slow/unstable links.
 
 ## Stack (decided; the newer Python prompt overrides the earlier Spring Boot plan — ADR-0001)
-- Backend: **Python 3.11+, FastAPI + Uvicorn**, in `backend/`. asyncpg, aioboto3/boto3, aioftp (or ftplib in threadpool), aio-pika (RabbitMQ), prometheus_client, PyJWT, `cryptography` (AES-256-GCM), pytest (+ testcontainers-python).
+- Backend: **Python 3.11+, FastAPI + Uvicorn**, in `backend/`. asyncpg, aioboto3/boto3, aioftp (or ftplib in threadpool), prometheus_client, PyJWT, `cryptography` (AES-256-GCM), pytest (+ testcontainers-python).
 - Frontend: React 19 + TS + Vite + Tailwind (teammates' code, keep it).
 - Simulator: Python/FastAPI (`simulator/`, teammates' code).
-- Infra: Docker Compose, nginx (TLS, only public entry), PostgreSQL (metadata) + separate PostgreSQL (blob storage), MinIO, FTP server, RabbitMQ (4 per-category queues + DLQ), Prometheus, Grafana, Loki, Alertmanager, toxiproxy, Kubernetes manifests (HPA, NetworkPolicy).
+- Infra: Docker Compose, nginx (TLS, only public entry), PostgreSQL (metadata) + separate PostgreSQL (blob storage), MinIO, FTP server, a Postgres outbox + bulkheads + circuit breakers (ADR-0013 replaced RabbitMQ), Prometheus, Grafana, Loki, Alertmanager, toxiproxy, Kubernetes manifests (HPA, NetworkPolicy).
 - Contract: `API_CONTRACT.md` (prefix `/api/v1`) + `frontend/src/types/filegrid.ts` JSON shapes are law. Policies: `policies.yaml`.
 
 ## Working rules

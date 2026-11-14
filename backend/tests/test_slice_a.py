@@ -13,7 +13,7 @@ def _ingest(client, auth, data=PAYLOAD, category="outage_records", name="a.pdf")
 
 
 def test_health_ok(client):
-    r = client.get("/api/v1/health")
+    r = client.get("/health")  # internal path; /api/v1/health needs a user (slice D)
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
 
@@ -127,5 +127,5 @@ def test_audit_trail(client, auth):
 
 def test_unknown_category_and_unimplemented_storage(client, auth):
     assert _ingest(client, auth, category="bogus").status_code == 422
-    # connection_docs needs encryption, which arrives in slice F
-    assert _ingest(client, auth, category="connection_docs").status_code == 501
+    # connection_docs needs encryption: implemented in slice F (was 501 before)
+    assert _ingest(client, auth, category="connection_docs").status_code == 202

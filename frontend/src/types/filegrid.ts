@@ -45,6 +45,13 @@ export interface IngestResponse {
 export interface ChunkUploadResponse {
   upload_id: string
   received_chunks: number
+  total_chunks?: number
+  /** 'complete' on the chunk that finished the file; then the file fields are set */
+  status?: 'open' | 'complete'
+  file_id?: string
+  trace_id?: string
+  sha256?: string
+  storage?: StorageBackend
 }
 
 export interface CategoryPolicy {

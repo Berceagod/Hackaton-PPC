@@ -1,6 +1,7 @@
 """Metadata repository (PostgreSQL via asyncpg). Tables are created idempotently at startup."""
 
 import asyncio
+import json
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -57,7 +58,41 @@ CREATE TABLE IF NOT EXISTS meter_readings (
 -- databases created before slice C
 ALTER TABLE meter_readings ADD COLUMN IF NOT EXISTS status     TEXT        NOT NULL DEFAULT 'pending';
 ALTER TABLE meter_readings ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ NOT NULL DEFAULT now();
+-- slice G outbox: a reading whose storage is down is kept here (exact bytes) as 'queued'
+-- and written out by the drainer; raw is cleared once stored (ADR-0013)
+ALTER TABLE meter_readings ADD COLUMN IF NOT EXISTS raw         BYTEA;
+ALTER TABLE meter_readings ADD COLUMN IF NOT EXISTS filename    TEXT;
+ALTER TABLE meter_readings ADD COLUMN IF NOT EXISTS uploaded_by TEXT;
+CREATE INDEX IF NOT EXISTS idx_meter_queued ON meter_readings (claimed_at) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_files_cat_sha ON files_metadata (category, sha256);
+
+-- slice E: chunked, resumable uploads (ADR-0010)
+CREATE TABLE IF NOT EXISTS upload_sessions (
+    id           UUID PRIMARY KEY,                     -- client-chosen upload_id
+    owner        TEXT        NOT NULL,
+    category     TEXT        NOT NULL,
+    filename     TEXT        NOT NULL,
+    total_chunks INT         NOT NULL,
+    size_bytes   BIGINT,                               -- declared by the client (optional)
+    sha256       CHAR(64),                             -- declared by the client (optional)
+    metadata     JSONB       NOT NULL DEFAULT '{}',
+    trace_id     TEXT        NOT NULL,
+    status       TEXT        NOT NULL DEFAULT 'open',  -- open | assembling | complete | failed
+    encrypted    BOOLEAN     NOT NULL DEFAULT FALSE,   -- staged chunks encrypted (slice F)
+    file_id      UUID,
+    reason       TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS encrypted BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE TABLE IF NOT EXISTS upload_chunks (
+    upload_id   UUID        NOT NULL REFERENCES upload_sessions (id) ON DELETE CASCADE,
+    idx         INT         NOT NULL,
+    size_bytes  BIGINT      NOT NULL,
+    sha256      CHAR(64)    NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (upload_id, idx)                       -- a resent chunk replaces itself
+);
 
 CREATE TABLE IF NOT EXISTS policies_config (
     category    TEXT PRIMARY KEY,
@@ -127,6 +162,21 @@ class Repo(Protocol):
         self, meter_id: str, reading_ts: datetime, file_id: str
     ) -> None: ...
     async def healthy(self) -> bool: ...
+    # chunked uploads (slice E)
+    async def open_upload(self, session: dict) -> dict: ...
+    async def get_upload(self, upload_id: str) -> dict | None: ...
+    async def record_chunk(self, upload_id: str, index: int, size: int, sha256: str) -> int: ...
+    async def received_chunks(self, upload_id: str) -> list[int]: ...
+    async def start_assembly(self, upload_id: str, stale_after: float) -> bool: ...
+    async def complete_upload(self, upload_id: str, rec: FileRecord) -> None: ...
+    async def reopen_upload(self, upload_id: str) -> None: ...
+    async def fail_upload(self, upload_id: str, reason: str) -> None: ...
+    # meter outbox + stale uploads (slice G)
+    async def queue_reading(self, meter_id, reading_ts, raw, filename, uploaded_by) -> bool: ...
+    async def claim_queued(self, limit: int, retry_after: float) -> list[dict]: ...
+    async def count_queued(self) -> int: ...
+    async def list_stale_uploads(self, older_than_seconds: float) -> list[tuple[str, int]]: ...
+    async def delete_upload(self, upload_id: str) -> None: ...
 
 
 _COLS = (
@@ -171,23 +221,27 @@ def _row_to_record(row: asyncpg.Record) -> FileRecord:
 
 
 class PostgresRepo:
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    POLICY_CHANNEL = "filegrid_policies"
+
+    def __init__(self, pool: asyncpg.Pool, dsn: str | None = None) -> None:
         self._pool = pool
+        self._dsn = dsn
+        self._listener: asyncpg.Connection | None = None
 
     @classmethod
-    async def connect(cls, dsn: str) -> "PostgresRepo":
+    async def connect(cls, dsn: str, max_size: int = 10) -> "PostgresRepo":
         pool = None
         last: Exception | None = None
         for _ in range(30):  # postgres may still be starting
             try:
-                pool = await asyncpg.create_pool(dsn, min_size=1, max_size=10)
+                pool = await asyncpg.create_pool(dsn, min_size=1, max_size=max_size)
                 break
             except (OSError, asyncpg.PostgresError) as exc:
                 last = exc
                 await asyncio.sleep(2)
         if pool is None:
             raise RuntimeError(f"Postgres not reachable: {last}")
-        return cls(pool)
+        return cls(pool, dsn)
 
     async def close(self) -> None:
         await self._pool.close()
@@ -244,7 +298,9 @@ class PostgresRepo:
             )
         if row is None:  # released between our statements; sender retries
             return "in_flight", None
-        return ("duplicate" if row["status"] == "stored" else "in_flight"), str(row["file_id"])
+        # 'queued' is durably accepted (outbox, slice G): a resend is a duplicate too
+        return (("duplicate" if row["status"] in ("stored", "queued") else "in_flight"),
+                str(row["file_id"]))
 
     async def complete_reading(self, meter_id, reading_ts, rec: FileRecord) -> None:
         async with self._pool.acquire() as con:
@@ -256,7 +312,7 @@ class PostgresRepo:
                     *_file_args(rec),
                 )
                 await con.execute(
-                    "UPDATE meter_readings SET status = 'stored' "
+                    "UPDATE meter_readings SET status = 'stored', raw = NULL "
                     "WHERE meter_id = $1 AND reading_ts = $2",
                     meter_id, reading_ts,
                 )
@@ -268,6 +324,146 @@ class PostgresRepo:
                 "AND status = 'pending' AND file_id = $3",
                 meter_id, reading_ts, uuid.UUID(file_id),
             )
+
+    # ---- chunked uploads (see chunked_upload.py) ----
+
+    async def open_upload(self, s: dict) -> dict:
+        async with self._pool.acquire() as con:
+            await con.execute(
+                "INSERT INTO upload_sessions (id, owner, category, filename, total_chunks, "
+                "size_bytes, sha256, metadata, trace_id, encrypted) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10) ON CONFLICT (id) DO NOTHING",
+                uuid.UUID(s["id"]), s["owner"], s["category"], s["filename"], s["total_chunks"],
+                s["size_bytes"], s["sha256"], json.dumps(s["metadata"]), s["trace_id"],
+                bool(s.get("encrypted")),
+            )
+        return await self.get_upload(s["id"])
+
+    async def get_upload(self, upload_id: str) -> dict | None:
+        async with self._pool.acquire() as con:
+            row = await con.fetchrow(
+                "SELECT id, owner, category, filename, total_chunks, size_bytes, sha256, "
+                "metadata, trace_id, status, file_id, reason, encrypted "
+                "FROM upload_sessions WHERE id = $1",
+                uuid.UUID(upload_id),
+            )
+        if row is None:
+            return None
+        d = dict(row)
+        d["id"] = str(d["id"])
+        d["file_id"] = str(d["file_id"]) if d["file_id"] else None
+        if isinstance(d["metadata"], str):
+            d["metadata"] = json.loads(d["metadata"])
+        return d
+
+    async def record_chunk(self, upload_id: str, index: int, size: int, sha256: str) -> int:
+        uid = uuid.UUID(upload_id)
+        async with self._pool.acquire() as con:
+            await con.execute(
+                "INSERT INTO upload_chunks (upload_id, idx, size_bytes, sha256) "
+                "VALUES ($1,$2,$3,$4) ON CONFLICT (upload_id, idx) DO UPDATE SET "
+                "size_bytes = EXCLUDED.size_bytes, sha256 = EXCLUDED.sha256, received_at = now()",
+                uid, index, size, sha256,
+            )
+            # activity keeps a slow upload from being purged as abandoned (slice G)
+            await con.execute(
+                "UPDATE upload_sessions SET updated_at = now() WHERE id = $1", uid
+            )
+            return await con.fetchval(
+                "SELECT count(*) FROM upload_chunks WHERE upload_id = $1", uid
+            )
+
+    async def received_chunks(self, upload_id: str) -> list[int]:
+        async with self._pool.acquire() as con:
+            rows = await con.fetch(
+                "SELECT idx FROM upload_chunks WHERE upload_id = $1 ORDER BY idx",
+                uuid.UUID(upload_id),
+            )
+        return [r["idx"] for r in rows]
+
+    async def start_assembly(self, upload_id: str, stale_after: float) -> bool:
+        """Only one request may assemble an upload (the status change is the lock)."""
+        async with self._pool.acquire() as con:
+            row = await con.fetchrow(
+                "UPDATE upload_sessions SET status = 'assembling', updated_at = now() "
+                "WHERE id = $1 AND (status = 'open' OR (status = 'assembling' "
+                "AND updated_at < now() - make_interval(secs => $2))) RETURNING id",
+                uuid.UUID(upload_id), float(stale_after),
+            )
+        return row is not None
+
+    async def complete_upload(self, upload_id: str, rec: FileRecord) -> None:
+        async with self._pool.acquire() as con:
+            async with con.transaction():
+                await con.execute(_INSERT_FILE, *_file_args(rec))
+                await con.execute(
+                    "UPDATE upload_sessions SET status = 'complete', file_id = $2, "
+                    "updated_at = now() WHERE id = $1",
+                    uuid.UUID(upload_id), uuid.UUID(rec.id),
+                )
+
+    async def reopen_upload(self, upload_id: str) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute(
+                "UPDATE upload_sessions SET status = 'open', updated_at = now() "
+                "WHERE id = $1 AND status = 'assembling'",
+                uuid.UUID(upload_id),
+            )
+
+    async def fail_upload(self, upload_id: str, reason: str) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute(
+                "UPDATE upload_sessions SET status = 'failed', reason = $2, updated_at = now() "
+                "WHERE id = $1",
+                uuid.UUID(upload_id), reason,
+            )
+
+    # ---- meter outbox (slice G, see meter_outbox.py) ----
+
+    async def queue_reading(self, meter_id, reading_ts, raw: bytes, filename: str,
+                            uploaded_by: str) -> bool:
+        async with self._pool.acquire() as con:
+            row = await con.fetchrow(
+                "UPDATE meter_readings SET status = 'queued', raw = $3, filename = $4, "
+                "uploaded_by = $5, claimed_at = now() "
+                "WHERE meter_id = $1 AND reading_ts = $2 AND status = 'pending' RETURNING id",
+                meter_id, reading_ts, raw, filename, uploaded_by,
+            )
+        return row is not None
+
+    async def claim_queued(self, limit: int, retry_after: float) -> list[dict]:
+        """Take a batch of queued readings not tried in the last `retry_after` seconds.
+        SKIP LOCKED + the claimed_at bump let several backend replicas drain in parallel
+        without taking the same reading."""
+        async with self._pool.acquire() as con:
+            rows = await con.fetch(
+                "UPDATE meter_readings SET claimed_at = now() WHERE id IN ("
+                "  SELECT id FROM meter_readings WHERE status = 'queued' "
+                "  AND claimed_at <= now() - make_interval(secs => $2) "
+                "  ORDER BY claimed_at LIMIT $1 FOR UPDATE SKIP LOCKED) "
+                "RETURNING meter_id, reading_ts, zone, file_id, trace_id, raw, filename, uploaded_by",
+                limit, float(retry_after),
+            )
+        return [{**dict(r), "file_id": str(r["file_id"])} for r in rows]
+
+    async def count_queued(self) -> int:
+        async with self._pool.acquire() as con:
+            return await con.fetchval("SELECT count(*) FROM meter_readings WHERE status = 'queued'")
+
+    # ---- stale chunked uploads (slice G) ----
+
+    async def list_stale_uploads(self, older_than_seconds: float) -> list[tuple[str, int]]:
+        async with self._pool.acquire() as con:
+            rows = await con.fetch(
+                "SELECT id, total_chunks FROM upload_sessions WHERE status IN ('open', 'failed') "
+                "AND updated_at < now() - make_interval(secs => $1)",
+                float(older_than_seconds),
+            )
+        return [(str(r["id"]), r["total_chunks"]) for r in rows]
+
+    async def delete_upload(self, upload_id: str) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute("DELETE FROM upload_sessions WHERE id = $1", uuid.UUID(upload_id))
 
     async def get_file(self, file_id: str) -> FileRecord | None:
         try:
@@ -370,6 +566,14 @@ class PostgresRepo:
                         "priority=EXCLUDED.priority, updated_at=now()",
                         name, p["storage"], p["encryption"], p["deduplicate"], p["priority"],
                     )
+                # delivered on commit to every worker and replica listening (slice G)
+                await con.execute(f"NOTIFY {self.POLICY_CHANNEL}")
+
+    async def listen_policies(self, on_change) -> None:
+        """Call on_change() whenever any process saves policies. Uses one dedicated
+        connection (LISTEN cannot share a pooled connection)."""
+        self._listener = await asyncpg.connect(self._dsn)
+        await self._listener.add_listener(self.POLICY_CHANNEL, lambda *_: on_change())
 
     async def healthy(self) -> bool:
         try:

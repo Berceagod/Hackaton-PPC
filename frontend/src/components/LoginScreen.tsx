@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Shield, Zap, Loader2 } from 'lucide-react'
-import { login } from '../services/api'
+import { login, USE_MOCK } from '../services/api'
 import type { AuthSession } from '../types/filegrid'
 
 interface LoginScreenProps {
@@ -9,7 +9,9 @@ interface LoginScreenProps {
 
 export function LoginScreen({ onSuccess }: LoginScreenProps) {
   const [email, setEmail] = useState('dispecer@ppc.ro')
-  const [password, setPassword] = useState('dispecer')
+  // Mock mode has fixed demo accounts; the real backend's passwords are random per
+  // installation (printed by start.sh / start.ps1, stored only in .env).
+  const [password, setPassword] = useState(USE_MOCK ? 'dispecer' : '')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -89,8 +91,18 @@ export function LoginScreen({ onSuccess }: LoginScreenProps) {
           </button>
 
           <p className="mt-4 text-center text-[11px] text-grid-muted">
-            Demo: <span className="font-mono text-grid-cyan">dispecer@ppc.ro</span> / dispecer ·{' '}
-            <span className="font-mono text-grid-cyan">admin@ppc.ro</span> / admin
+            {USE_MOCK ? (
+              <>
+                Demo: <span className="font-mono text-grid-cyan">dispecer@ppc.ro</span> / dispecer ·{' '}
+                <span className="font-mono text-grid-cyan">admin@ppc.ro</span> / admin
+              </>
+            ) : (
+              <>
+                Conturi: <span className="font-mono text-grid-cyan">dispecer@ppc.ro</span> ·{' '}
+                <span className="font-mono text-grid-cyan">admin@ppc.ro</span> — parolele sunt
+                afișate de start.sh / start.ps1 (fișierul .env)
+              </>
+            )}
           </p>
         </form>
       </div>

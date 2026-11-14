@@ -5,6 +5,7 @@
 # Usage: scripts/demo/policy-change.sh [size_mb]   (default 7 MB)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+source scripts/lib/env.sh
 
 BASE="${BASE:-https://localhost/api/v1}"
 SIZE_MB="${1:-7}"
@@ -19,8 +20,8 @@ login() { $CURL -X POST "$BASE/auth/login" -H 'Content-Type: application/json' \
   -d "{\"email\":\"$1\",\"password\":\"$2\"}" | json '["token"]'; }
 policy() { printf '{"outage_records":{"storage":"%s","encryption":false,"deduplicate":false,"priority":"high"}}' "$1"; }
 
-ADMIN="Authorization: Bearer $(login admin@ppc.ro admin)"
-DISP="Authorization: Bearer $(login dispecer@ppc.ro dispecer)"
+ADMIN="Authorization: Bearer $(login admin@ppc.ro "$(env_value ADMIN_PASSWORD)")"
+DISP="Authorization: Bearer $(login dispecer@ppc.ro "$(env_value DISPECER_PASSWORD)")"
 STARTED=$(docker compose ps -q backend | xargs docker inspect -f '{{.State.StartedAt}}')
 
 echo "== 1. Only an admin may change policies"

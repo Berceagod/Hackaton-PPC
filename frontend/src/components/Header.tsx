@@ -5,7 +5,8 @@ import {
   FlaskConical,
   User,
 } from 'lucide-react'
-import { USE_MOCK } from '../services/api'
+import { useEffect, useState } from 'react'
+import { getHealth, USE_MOCK, type ApiHealth } from '../services/api'
 import type { AuthUser } from '../types/filegrid'
 
 export type AppTab = 'upload' | 'files' | 'policies' | 'analytics'
@@ -24,7 +25,34 @@ interface HeaderProps {
   onLogout: () => void
 }
 
+const HEALTH_BADGE: Record<ApiHealth, { label: string; className: string }> = {
+  ok: { label: 'API Online', className: 'border-grid-green/25 bg-grid-green/10 text-grid-green' },
+  degraded: {
+    label: 'API Degradat',
+    className: 'border-grid-amber/30 bg-grid-amber/10 text-grid-amber',
+  },
+  offline: { label: 'API Offline', className: 'border-grid-red/30 bg-grid-red/10 text-grid-red' },
+}
+
+const HEALTH_POLL_MS = 15_000
+
 export function Header({ user, activeTab, onTabChange, onLogout }: HeaderProps) {
+  const [health, setHealth] = useState<ApiHealth>('ok')
+
+  useEffect(() => {
+    let alive = true
+    async function poll() {
+      const status = await getHealth()
+      if (alive) setHealth(status)
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), HEALTH_POLL_MS)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [])
+
   return (
     <header className="sticky top-0 z-40 border-b border-grid-border/80 bg-grid-bg/85 backdrop-blur-md">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3">
@@ -39,9 +67,11 @@ export function Header({ user, activeTab, onTabChange, onLogout }: HeaderProps) 
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 rounded-md border border-grid-green/25 bg-grid-green/10 px-2.5 py-1 text-[11px] font-medium text-grid-green">
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium ${HEALTH_BADGE[health].className}`}
+          >
             <Activity className="h-3 w-3 animate-pulse-soft" />
-            API Online
+            {HEALTH_BADGE[health].label}
           </span>
           {USE_MOCK && (
             <span className="inline-flex items-center gap-1.5 rounded-md border border-grid-amber/30 bg-grid-amber/10 px-2.5 py-1 text-[11px] font-medium text-grid-amber">

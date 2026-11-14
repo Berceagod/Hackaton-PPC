@@ -9,8 +9,10 @@ any number of backend replicas cannot create two rows.
              repeating the write is harmless)
   3. commit  files_metadata row + status 'stored' in ONE transaction -> 202
 
-  already stored            -> 409 (what the simulator counts as "duplicate rejected")
-  storage write failed      -> claim released, 503 (the sender's retry will succeed)
+  already stored or queued  -> 409 (what the simulator counts as "duplicate rejected")
+  storage write failed      -> exact bytes kept in the metadata DB as 'queued', 202
+                               (meter_outbox.py writes them out later, slice G);
+                               only if that also fails: claim released, 503
   duplicate while in flight -> 503 + Retry-After (never say "stored" before it is)
   claim orphaned by a crash -> taken over after STALE_CLAIM_SECONDS
 """
@@ -26,6 +28,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
+from crypto_envelope import encrypt_stream
 from repo import FileRecord
 from storage.base import StorageError
 
@@ -88,6 +91,11 @@ async def _one_chunk(data: bytes):
     yield data
 
 
+def reading_key(meter_id: str, reading_ts: datetime) -> str:
+    """Deterministic storage key: a retried or drained write overwrites the same object."""
+    return f"{CATEGORY}/{meter_id}/{reading_ts:%Y%m%dT%H%M%S%f}Z.json"
+
+
 async def ingest_meter_reading(deps, file, idempotency_key, principal, trace_id) -> JSONResponse:
     raw = await file.read(MAX_READING_BYTES + 1)
     if len(raw) > MAX_READING_BYTES:
@@ -98,13 +106,12 @@ async def ingest_meter_reading(deps, file, idempotency_key, principal, trace_id)
         raise HTTPException(422, "Idempotency-Key does not match meter_id:timestamp of the reading")
 
     policy = await deps.policies.get(CATEGORY)
-    if policy.encryption:
-        raise HTTPException(501, "Encryption not implemented yet (slice F)")
     storage = deps.storages.get(policy.storage)
     if storage is None:
         raise HTTPException(501, f"Storage '{policy.storage}' not implemented")
 
-    state, file_id = await deps.repo.claim_reading(
+    repo = deps.meters()  # own connection pool (bulkhead, slice G)
+    state, file_id = await repo.claim_reading(
         {
             "meter_id": reading.meter_id,
             "reading_ts": reading.reading_ts,
@@ -131,32 +138,39 @@ async def ingest_meter_reading(deps, file, idempotency_key, principal, trace_id)
             content={"error": "reading_in_flight", "trace_id": trace_id, **ident},
         )
 
-    key = f"{CATEGORY}/{reading.meter_id}/{reading.reading_ts:%Y%m%dT%H%M%S%f}Z.json"
+    key = reading_key(reading.meter_id, reading.reading_ts)
+    filename = file.filename or f"{reading.meter_id}_{reading.reading_ts:%Y%m%dT%H%M%S}.json"
     try:
-        await storage.put_stream(key, _one_chunk(raw))
+        # Encrypted under a key derived from file_id: a takeover that rewrites the same
+        # object for the same file_id produces another valid ciphertext of the same bytes.
+        body = (
+            encrypt_stream(_one_chunk(raw), deps.settings.master_key, file_id)
+            if policy.encryption else _one_chunk(raw)
+        )
+        await storage.put_stream(key, body)
     except StorageError as exc:
         log.error(
             "meter storage write failed",
             extra={"category": CATEGORY, "storage": storage.name, "error": str(exc), **ident},
         )
-        await _release(deps, reading, file_id)
-        raise HTTPException(503, f"Storage '{storage.name}' unavailable") from exc
+        return await _queue(deps, reading, raw, file_id, filename, principal, trace_id,
+                            storage.name, ident)
 
     record = FileRecord(
         id=file_id,
-        filename=file.filename or f"{reading.meter_id}_{reading.reading_ts:%Y%m%dT%H%M%S}.json",
+        filename=filename,
         category=CATEGORY,
         storage=storage.name,
         storage_key=key,
         size_bytes=len(raw),
         sha256=hashlib.sha256(raw).hexdigest(),
-        encrypted=False,
+        encrypted=policy.encryption,
         trace_id=trace_id,
         zone=reading.zone,
         uploaded_by=principal.email,
     )
     try:
-        await deps.repo.complete_reading(reading.meter_id, reading.reading_ts, record)
+        await repo.complete_reading(reading.meter_id, reading.reading_ts, record)
     except Exception as exc:
         log.error("meter commit failed", extra={"category": CATEGORY, "error": str(exc), **ident})
         await _release(deps, reading, file_id)
@@ -177,10 +191,39 @@ async def ingest_meter_reading(deps, file, idempotency_key, principal, trace_id)
     )
 
 
+async def _queue(deps, reading, raw, file_id, filename, principal, trace_id, storage_name,
+                 ident) -> JSONResponse:
+    """The storage is down: keep the exact reading in the metadata DB (outbox). It is
+    durably accepted, so the sender gets 202 and stops retrying; the drainer writes it
+    to the storage later. If even that fails, release the claim and ask for a retry."""
+    try:
+        queued = await deps.meters().queue_reading(
+            reading.meter_id, reading.reading_ts, raw, filename, principal.email)
+    except Exception as exc:
+        log.error("could not queue reading", extra={"category": CATEGORY, "error": str(exc), **ident})
+        queued = False
+    if not queued:
+        await _release(deps, reading, file_id)
+        raise HTTPException(503, f"Storage '{storage_name}' unavailable",
+                            headers={"Retry-After": "2"})
+    log.warning("reading queued: storage unavailable",
+                extra={"category": CATEGORY, "storage": storage_name, "file_id": file_id, **ident})
+    return JSONResponse(
+        status_code=202,
+        content={
+            "file_id": file_id,
+            "trace_id": trace_id,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "storage": storage_name,
+            "status": "queued",
+        },
+    )
+
+
 async def _release(deps, reading: ParsedReading, file_id: str) -> None:
     """Drop our pending claim so the sender's retry is treated as new. If this fails
     too, the claim simply goes stale and is taken over by the retry."""
     try:
-        await deps.repo.release_reading(reading.meter_id, reading.reading_ts, file_id)
+        await deps.meters().release_reading(reading.meter_id, reading.reading_ts, file_id)
     except Exception:
         log.warning("could not release claim; it will go stale", exc_info=True)

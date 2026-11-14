@@ -4,6 +4,7 @@
 # Usage: scripts/demo/smoke.sh [size_mb]     (default 12 MB: exercises S3 multipart)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+source scripts/lib/env.sh
 
 BASE="${BASE:-https://localhost/api/v1}"
 SIZE_MB="${1:-12}"
@@ -17,7 +18,7 @@ fail() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; exit 1; }
 
 echo "== 1. Login"
 TOKEN=$($CURL -X POST "$BASE/auth/login" -H 'Content-Type: application/json' \
-  -d '{"email":"dispecer@ppc.ro","password":"dispecer"}' | python -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+  -d "{\"email\":\"dispecer@ppc.ro\",\"password\":\"$(env_value DISPECER_PASSWORD)\"}" | python -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 [ -n "$TOKEN" ] && ok "got JWT"
 AUTH="Authorization: Bearer $TOKEN"
 

@@ -181,3 +181,42 @@ def test_hanging_dependency_is_reported_down_not_waited_for(client, ftp_storage,
     monkeypatch.setattr(ftp_storage, "healthy", hang)
     body = client.get("/health").json()
     assert body["checks"]["ftp"] is False and body["checks"]["s3"] is True
+
+
+# ---------------- health: dependency report is not public ----------------
+
+def test_public_health_needs_a_logged_in_user(client, auth):
+    # /api/v1/* is what nginx exposes to the internet: the storage map is not for anonymous eyes
+    assert client.get("/api/v1/health").status_code == 401
+    assert client.get("/api/v1/health", headers=SIM).status_code == 403
+    r = client.get("/api/v1/health", headers=auth)
+    assert r.status_code == 200 and r.json()["status"] == "ok"
+
+
+def test_internal_health_and_liveness_stay_open(client):
+    # root paths are reachable only on the Docker network (nginx proxies /api/ only)
+    assert client.get("/health").json()["status"] == "ok"
+    assert client.get("/livez").json() == {"status": "alive"}
+    assert client.get("/api/v1/livez").json() == {"status": "alive"}
+
+
+# ---------------- download of files with Romanian names ----------------
+
+def test_download_keeps_a_non_ascii_filename(client, auth):
+    name = "raport_întrerupere_ștație.pdf"
+    fid = _upload(client, auth, name=name).json()["file_id"]
+    r = client.get(f"/api/v1/files/{fid}/download", headers=auth)
+    assert r.status_code == 200 and r.content == DATA
+    cd = r.headers["content-disposition"]
+    assert 'filename="raport_intrerupere_statie.pdf"' in cd  # ASCII fallback
+    assert "filename*=UTF-8''raport_%C3%AEntrerupere_%C8%99ta%C8%9Bie.pdf" in cd  # exact name
+
+
+def test_header_breaking_characters_are_removed_from_filename():
+    # a stored filename can contain anything a client sent; the header must stay one line
+    from routes.files import _content_disposition
+
+    cd = _content_disposition('a"b' + "\\" + 'c;\r\nd/e.pdf')
+    assert "\r" not in cd and "\n" not in cd
+    assert cd.startswith('attachment; filename="abc;de.pdf"; ')
+    cd.encode("latin-1")  # must be a valid HTTP header value

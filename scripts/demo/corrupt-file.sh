@@ -6,6 +6,7 @@
 # Usage: scripts/demo/corrupt-file.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+source scripts/lib/env.sh
 
 BASE="${BASE:-https://localhost/api/v1}"
 CURL="curl -sk"
@@ -19,8 +20,8 @@ login() { $CURL -X POST "$BASE/auth/login" -H 'Content-Type: application/json' \
   -d "{\"email\":\"$1\",\"password\":\"$2\"}" | json '["token"]'; }
 policy() { printf '{"outage_records":{"storage":"%s","encryption":false,"deduplicate":false,"priority":"high"}}' "$1"; }
 
-ADMIN="Authorization: Bearer $(login admin@ppc.ro admin)"
-DISP="Authorization: Bearer $(login dispecer@ppc.ro dispecer)"
+ADMIN="Authorization: Bearer $(login admin@ppc.ro "$(env_value ADMIN_PASSWORD)")"
+DISP="Authorization: Bearer $(login dispecer@ppc.ro "$(env_value DISPECER_PASSWORD)")"
 restore() { $CURL -o /dev/null -X PUT "$BASE/admin/policies" -H "$ADMIN" -d "$(policy s3)" || true; rm -rf "$TMP"; }
 trap restore EXIT
 

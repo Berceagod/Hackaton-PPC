@@ -106,6 +106,11 @@ class PolicyStore:
             log.warning("policy refresh failed; using cached policy", exc_info=True)
         self._loaded_at = time.monotonic()
 
+    def invalidate(self) -> None:
+        """Another worker or replica saved a change (Postgres NOTIFY): re-read on next use.
+        The TTL refresh stays as a fallback if the notification connection drops."""
+        self._loaded_at = float("-inf")
+
     async def get(self, category: str) -> CategoryPolicy:
         await self._refresh()
         return self._policies[category]

@@ -65,6 +65,9 @@ CONFIG = {
     "max_in_flight": int(_env("MAX_IN_FLIGHT", "200")),
     "max_retries": int(_env("MAX_RETRIES", "5")),
     "start_mode": _env("START_MODE", "normal"),
+    # backlog: citiri amanate cand FileGrid e indisponibil (nu se pierd)
+    "backlog_max": int(_env("BACKLOG_MAX", "500000")),
+    "backlog_rate": float(_env("BACKLOG_RATE", "50")),  # retrimiteri / secunda
     "control_port": int(_env("CONTROL_PORT", "8080")),
     "seed": int(_env("SEED", "42")),
 }
@@ -110,7 +113,9 @@ M_REQUESTS = Counter(
     ["result", "mode"],  # result: ok | duplicate_rejected | client_error | failed
 )
 M_RETRIES = Counter("sim_retries_total", "Reincercari dupa erori de retea / 5xx")
-M_DROPPED = Counter("sim_dropped_total", "Citiri nepornite: prea multe cereri in zbor (backpressure)")
+M_DROPPED = Counter("sim_dropped_total", "Citiri pierdute: backlog plin (memoria contorului epuizata)")
+M_BACKLOG = Gauge("sim_backlog", "Citiri amanate (FileGrid indisponibil), in asteptare de retrimitere")
+M_REDELIVERED = Counter("sim_redelivered_total", "Citiri din backlog livrate ulterior (202 sau 409)")
 M_LATENCY = Histogram(
     "sim_request_duration_seconds",
     "Durata unei cereri de ingestie (inclusiv retry-uri)",
@@ -225,7 +230,11 @@ class SimState:
         self.paused: bool = False
         self.in_flight: int = 0
         self.recent: deque[dict] = deque(maxlen=1000)  # pentru retrimiteri (duplicate)
-        self.counts = {"ok": 0, "duplicate_rejected": 0, "client_error": 0, "failed": 0, "dropped": 0}
+        self.counts = {"ok": 0, "duplicate_rejected": 0, "client_error": 0, "failed": 0, "dropped": 0,
+                       "deferred": 0, "redelivered": 0}
+        # citiri care nu au putut fi trimise: retrimise de backlog_worker (memoria contorului)
+        self.backlog: deque[dict] = deque()
+        self.retries = 0  # reincercari (retele instabile, 5xx), vizibile in /status
         self.started_at = time.time()
         self._update_gauges()
 
@@ -395,10 +404,20 @@ async def send(client: httpx.AsyncClient, payload: dict, is_duplicate: bool) -> 
 
             if attempt < CONFIG["max_retries"]:
                 M_RETRIES.inc()
+                STATE.retries += 1
                 await asyncio.sleep(min(0.2 * 2**attempt, 5.0) * random.uniform(0.5, 1.5))
         else:
+            # Ca un contor real: citirea ramane in memoria contorului si e retrimisa cand
+            # FileGrid revine (backlog), in loc sa se piarda. Idempotency-Key-ul identic
+            # face retrimiterea sigura: 202 sau 409, niciodata o dublura.
+            if len(STATE.backlog) < CONFIG["backlog_max"]:
+                STATE.backlog.append(payload)
+                M_BACKLOG.set(len(STATE.backlog))
+                result = "deferred"
             log_event(
-                logging.ERROR, "ingest failed after retries",
+                logging.WARNING if result == "deferred" else logging.ERROR,
+                "ingest failed after retries" + ("; kept in backlog" if result == "deferred"
+                                                 else "; backlog full, reading LOST"),
                 meter_id=payload["meter_id"], error=last_error, duplicate=is_duplicate,
             )
     finally:
@@ -409,13 +428,62 @@ async def send(client: httpx.AsyncClient, payload: dict, is_duplicate: bool) -> 
         STATE.counts[result] += 1
 
 
+async def post_once(client: httpx.AsyncClient, payload: dict) -> str:
+    """One attempt: 'ok' | 'duplicate_rejected' | 'client_error' | 'retry'."""
+    try:
+        resp = await client.post(CONFIG["api_url"], **build_request(payload))
+    except httpx.TransportError:
+        return "retry"
+    if resp.status_code < 300:
+        return "ok"
+    if resp.status_code == 409:
+        return "duplicate_rejected"
+    if resp.status_code < 500 and resp.status_code != 429:
+        log_event(logging.WARNING, "backlog reading rejected", status=resp.status_code,
+                  meter_id=payload["meter_id"], body=resp.text[:300])
+        return "client_error"
+    return "retry"
+
+
+async def backlog_worker(client: httpx.AsyncClient) -> None:
+    """Retrimite citirile amanate, in ordine, cu cel mult BACKLOG_RATE pe secunda, pana
+    sunt acceptate (202) sau recunoscute ca deja primite (409)."""
+    pause = 1.0
+    while True:
+        if not STATE.backlog:
+            await asyncio.sleep(0.5)
+            continue
+        payload = STATE.backlog[0]
+        outcome = await post_once(client, payload)
+        if outcome == "retry":  # FileGrid inca indisponibil: asteptam, nu pierdem nimic
+            await asyncio.sleep(pause)
+            pause = min(pause * 2, 10.0)
+            continue
+        pause = 1.0
+        STATE.backlog.popleft()
+        M_BACKLOG.set(len(STATE.backlog))
+        if outcome == "client_error":
+            STATE.counts["failed"] += 1
+        else:
+            STATE.counts["redelivered"] += 1
+            M_REDELIVERED.inc()
+        await asyncio.sleep(1.0 / max(CONFIG["backlog_rate"], 1.0))
+
+
 TASKS: set[asyncio.Task] = set()
 
 
 def launch(client: httpx.AsyncClient, payload: dict, is_duplicate: bool) -> bool:
     if STATE.in_flight >= CONFIG["max_in_flight"]:
-        M_DROPPED.inc()
-        STATE.counts["dropped"] += 1
+        # Prea multe cereri in zbor (FileGrid lent/indisponibil): citirea nu se arunca, ci
+        # asteapta in memoria contorului (backlog). Se pierde doar daca backlog-ul e plin.
+        if len(STATE.backlog) < CONFIG["backlog_max"]:
+            STATE.backlog.append(payload)
+            M_BACKLOG.set(len(STATE.backlog))
+            STATE.counts["deferred"] += 1
+        else:
+            M_DROPPED.inc()
+            STATE.counts["dropped"] += 1
         return False
     task = asyncio.create_task(send(client, payload, is_duplicate))
     TASKS.add(task)
@@ -492,6 +560,8 @@ def status_dict() -> dict:
         "anomaly_ratio": STATE.anomaly_ratio,
         "meters": len(STATE.fleet),
         "in_flight": STATE.in_flight,
+        "backlog": len(STATE.backlog),
+        "retries": STATE.retries,
         "counts": STATE.counts,
         "uptime_s": round(time.time() - STATE.started_at),
         "api_url": CONFIG["api_url"],
@@ -566,7 +636,8 @@ async def main() -> None:
     server = uvicorn.Server(
         uvicorn.Config(app, host="0.0.0.0", port=CONFIG["control_port"], log_level="warning", access_log=False)
     )
-    background = [asyncio.create_task(producer(CLIENT)), asyncio.create_task(reporter())]
+    background = [asyncio.create_task(producer(CLIENT)), asyncio.create_task(reporter()),
+                  asyncio.create_task(backlog_worker(CLIENT))]
     try:
         await server.serve()  # se termina la SIGTERM (docker stop)
     finally:

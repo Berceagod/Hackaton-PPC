@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Save, RefreshCw, Zap, CheckCircle2 } from 'lucide-react'
-import { getPolicies, updatePolicies } from '../services/api'
+import { Save, RefreshCw, Zap, CheckCircle2, Lock } from 'lucide-react'
+import { getPolicies, getStoredSession, updatePolicies } from '../services/api'
 import type {
   FileCategory,
   PoliciesMap,
@@ -26,6 +26,8 @@ export function PoliciesPage({ pushToast }: PoliciesPageProps) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [applied, setApplied] = useState(false)
+  // Only an admin may change routing (the backend answers 403 otherwise)
+  const canEdit = getStoredSession()?.user.role === 'admin'
 
   useEffect(() => {
     void (async () => {
@@ -100,6 +102,7 @@ export function PoliciesPage({ pushToast }: PoliciesPageProps) {
             Modificați storage, criptare, deduplicare și prioritate — fără modificare de cod.
           </p>
         </div>
+        {canEdit ? (
         <button
           type="button"
           disabled={saving}
@@ -113,6 +116,12 @@ export function PoliciesPage({ pushToast }: PoliciesPageProps) {
           )}
           Salvează și Aplică Hot-Reload
         </button>
+        ) : (
+          <span className="inline-flex items-center gap-2 rounded-lg border border-grid-border px-4 py-2.5 text-sm text-grid-muted">
+            <Lock className="h-4 w-4" />
+            Doar citire — modificările sunt permise doar administratorului
+          </span>
+        )}
       </div>
 
       {applied && (
@@ -142,11 +151,12 @@ export function PoliciesPage({ pushToast }: PoliciesPageProps) {
                     Storage destinație
                   </label>
                   <select
+                    disabled={!canEdit}
                     value={p.storage}
                     onChange={(e) =>
                       updateCategory(cat, 'storage', e.target.value as StorageBackend)
                     }
-                    className="w-full rounded-lg border border-grid-border bg-grid-bg px-3 py-2 text-sm text-grid-text outline-none focus:ring-2 focus:ring-grid-blue"
+                    className="w-full rounded-lg border border-grid-border bg-grid-bg px-3 py-2 text-sm text-grid-text outline-none focus:ring-2 focus:ring-grid-blue disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <option value="postgres">postgres</option>
                     <option value="s3">s3</option>
@@ -156,11 +166,13 @@ export function PoliciesPage({ pushToast }: PoliciesPageProps) {
 
                 <ToggleRow
                   label="Criptare la stocare"
+                  disabled={!canEdit}
                   checked={p.encryption}
                   onChange={(v) => updateCategory(cat, 'encryption', v)}
                 />
                 <ToggleRow
                   label="Deduplicare"
+                  disabled={!canEdit}
                   checked={p.deduplicate}
                   onChange={(v) => updateCategory(cat, 'deduplicate', v)}
                 />
@@ -170,11 +182,12 @@ export function PoliciesPage({ pushToast }: PoliciesPageProps) {
                     Prioritate coadă
                   </label>
                   <select
+                    disabled={!canEdit}
                     value={p.priority}
                     onChange={(e) =>
                       updateCategory(cat, 'priority', e.target.value as QueuePriority)
                     }
-                    className="w-full rounded-lg border border-grid-border bg-grid-bg px-3 py-2 text-sm text-grid-text outline-none focus:ring-2 focus:ring-grid-blue"
+                    className="w-full rounded-lg border border-grid-border bg-grid-bg px-3 py-2 text-sm text-grid-text outline-none focus:ring-2 focus:ring-grid-blue disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <option value="high">high</option>
                     <option value="normal">normal</option>
@@ -194,10 +207,12 @@ function ToggleRow({
   label,
   checked,
   onChange,
+  disabled = false,
 }: {
   label: string
   checked: boolean
   onChange: (v: boolean) => void
+  disabled?: boolean
 }) {
   return (
     <div className="flex items-center justify-between rounded-lg border border-grid-border bg-grid-panel/40 px-3 py-2.5">
@@ -206,8 +221,9 @@ function ToggleRow({
         type="button"
         role="switch"
         aria-checked={checked}
+        disabled={disabled}
         onClick={() => onChange(!checked)}
-        className={`relative h-6 w-11 rounded-full transition ${
+        className={`relative h-6 w-11 rounded-full transition disabled:cursor-not-allowed disabled:opacity-50 ${
           checked ? 'bg-grid-cyan' : 'bg-grid-border'
         }`}
       >

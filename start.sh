@@ -28,23 +28,33 @@ ensure FTP_USER filegrid
 ensure FTP_PASSWORD "$(rand)"
 ensure JWT_SECRET "$(rand)$(rand)"
 ensure SIMULATOR_TOKEN "$(rand)"
-ensure DISPECER_PASSWORD dispecer
-ensure ADMIN_PASSWORD admin
+# AES-256 master key for personal data at rest (ADR-0011). Back up .env: without this key
+# encrypted documents cannot be read. Never commit it.
+ensure FILEGRID_MASTER_KEY "$(rand)"
+# UI accounts get random passwords (no password lives in the repository, ADR-0012).
+# Installations created before this change used the literal demo passwords: replace them.
+sed -i -e '/^DISPECER_PASSWORD=dispecer$/d' -e '/^ADMIN_PASSWORD=admin$/d' .env
+ensure DISPECER_PASSWORD "$(rand | head -c 16)"
+ensure ADMIN_PASSWORD "$(rand | head -c 16)"
 
 echo ">> Building and starting FileGrid"
 docker compose up -d --build "$@"
 
-echo ">> Waiting for the gateway to become healthy"
+echo ">> Waiting for FileGrid to come up"
+pw() { grep -E "^$1=" .env | cut -d= -f2- | tr -d '\r'; }
 for _ in $(seq 1 90); do
-  body="$(curl -sk --max-time 3 https://localhost/api/v1/health 2>/dev/null || true)"
-  if echo "$body" | grep -Eq '"status":"(ok|degraded)"'; then
+  # /api/v1/livez is public and reveals nothing; the storage report needs a login (slice D)
+  if curl -sk --max-time 3 https://localhost/api/v1/livez 2>/dev/null | grep -q '"status":"alive"'; then
     echo
     echo "FileGrid is up:  https://localhost   (self-signed certificate)"
-    echo "Login:           dispecer@ppc.ro / dispecer   or   admin@ppc.ro / admin"
-    echo "$body" | grep -q '"status":"degraded"' && echo "Note: /health is degraded (a storage may still be starting)."
+    echo "Login:           dispecer@ppc.ro / $(pw DISPECER_PASSWORD)"
+    echo "                 admin@ppc.ro    / $(pw ADMIN_PASSWORD)"
+    echo "                 (generated for this machine, stored only in .env)"
+    deps="$(docker compose exec -T backend python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8000/health', timeout=10).read().decode())" 2>/dev/null || true)"
+    echo "$deps" | grep -q '"status":"degraded"' && echo "Note: a storage is still starting or down: $deps"
     exit 0
   fi
   sleep 2
 done
-echo "Timed out waiting for health. Check: docker compose ps && docker compose logs nginx && docker compose logs backend" >&2
+echo "Timed out waiting for FileGrid. Check: docker compose ps && docker compose logs nginx && docker compose logs backend" >&2
 exit 1

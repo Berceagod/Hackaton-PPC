@@ -2,7 +2,9 @@
 
 import json
 import logging
+import unicodedata
 import uuid
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -17,6 +19,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from auth import Principal, require_roles
+from crypto_envelope import DecryptionError, decrypt_stream, encrypt_stream
 from integrity import HashingStream, sha256_of_stream, upload_chunks
 from logging_setup import trace_id_var
 from meter_ingest import ingest_meter_reading
@@ -41,10 +44,19 @@ def _safe_filename(name: str) -> str:
     return cleaned[:200] or "file"
 
 
+def _content_disposition(name: str) -> str:
+    """RFC 6266: an ASCII `filename` for old clients plus the exact UTF-8 name in
+    `filename*`. HTTP headers are latin-1, so a raw "ș" in the header would crash the
+    response (500) for every file with a Romanian name."""
+    safe = _safe_filename(name)
+    ascii_name = (
+        unicodedata.normalize("NFKD", safe).encode("ascii", "ignore").decode() or "file"
+    )
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(safe, safe='')}"
+
+
 async def _storage_for(deps, category: str):
     policy = await deps.policies.get(category)
-    if policy.encryption:
-        raise HTTPException(501, "Encryption not implemented yet (slice F)")
     storage = deps.storages.get(policy.storage)
     if storage is None:
         raise HTTPException(
@@ -62,6 +74,16 @@ async def ingest(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     principal: Principal = Depends(INGEST_ROLES),
 ) -> JSONResponse:
+    deps = request.app.state.deps
+    if deps.bulkheads is None or category not in CATEGORIES:
+        return await _ingest(request, file, category, metadata, idempotency_key, principal)
+    # bulkhead: this category's own concurrency limit, sized by its policy priority
+    priority = (await deps.policies.get(category)).priority
+    async with deps.bulkheads.slot(category, priority):
+        return await _ingest(request, file, category, metadata, idempotency_key, principal)
+
+
+async def _ingest(request, file, category, metadata, idempotency_key, principal) -> JSONResponse:
     deps = request.app.state.deps
     trace_id = trace_id_var.get()
     if category not in CATEGORIES:
@@ -83,11 +105,17 @@ async def ingest(
     file_id = str(uuid.uuid4())
     key = f"{category}/{file_id}"
 
-    # Single streaming pass: hash while uploading. Nothing is acknowledged
-    # until the storage confirmed the durable write.
+    # Single streaming pass: hash the plaintext while uploading (encrypting on the way
+    # when the policy says so). Nothing is acknowledged until the storage confirmed the
+    # durable write.
     stream = HashingStream(upload_chunks(file))
+    body = (
+        encrypt_stream(stream, deps.settings.master_key, file_id)
+        if policy.encryption else stream
+    )
     try:
-        size = await storage.put_stream(key, stream)
+        await storage.put_stream(key, body)
+        size = stream.size  # plaintext size, what the user uploaded and will download
     except StorageError as exc:
         log.error(
             "storage write failed",
@@ -121,7 +149,7 @@ async def ingest(
         storage_key=key,
         size_bytes=size,
         sha256=stream.hexdigest,
-        encrypted=False,
+        encrypted=policy.encryption,
         trace_id=trace_id,
         zone=meta.get("zone"),
         station=meta.get("station"),
@@ -191,15 +219,26 @@ async def _load_or_404(deps, file_id: str) -> FileRecord:
     return rec
 
 
+def plaintext_stream(deps, rec: FileRecord):
+    """The file's original bytes: decrypted on the fly when it is stored encrypted."""
+    source = deps.storages[rec.storage].get_stream(rec.storage_key)
+    if rec.encrypted:
+        return decrypt_stream(source, deps.settings.master_key, rec.id)
+    return source
+
+
 async def _verify(deps, rec: FileRecord) -> tuple[bool, str, str]:
-    """Re-hash the stored bytes. Returns (ok, actual_sha256, reason)."""
+    """Re-hash the stored bytes (decrypted and authenticated first when encrypted).
+    Returns (ok, actual_sha256, reason)."""
     storage = deps.storages.get(rec.storage)
     if storage is None:
         raise HTTPException(503, f"Storage '{rec.storage}' not available")
     try:
-        actual, _ = await sha256_of_stream(storage.get_stream(rec.storage_key))
+        actual, _ = await sha256_of_stream(plaintext_stream(deps, rec))
     except ObjectNotFound:
         return False, "", "object_missing"
+    except DecryptionError:
+        return False, "", "decryption_failed"  # ciphertext altered, truncated or moved
     except StorageError as exc:
         raise HTTPException(503, f"Storage '{rec.storage}' unavailable") from exc
     return actual == rec.sha256, actual, "" if actual == rec.sha256 else "checksum_mismatch"
@@ -272,15 +311,14 @@ async def download(
     await deps.repo.add_audit(
         file_id, "download", principal.email, trace_id, "Integritate verificată (SHA-256)"
     )
-    storage = deps.storages[rec.storage]
     return StreamingResponse(
-        storage.get_stream(rec.storage_key),
+        plaintext_stream(deps, rec),
         media_type="application/octet-stream",
         headers={
             "X-Integrity-Verified": "true",
             "X-File-Sha256": rec.sha256,
             "Content-Length": str(rec.size_bytes),
-            "Content-Disposition": f'attachment; filename="{_safe_filename(rec.filename)}"',
+            "Content-Disposition": _content_disposition(rec.filename),
         },
     )
 

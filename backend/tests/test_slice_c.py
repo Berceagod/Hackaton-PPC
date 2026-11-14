@@ -108,9 +108,16 @@ def test_oversized_reading_is_413(client, repo):
 
 
 def test_storage_failure_is_503_and_the_retry_then_succeeds(client, pg_storage, repo):
-    """Never lost: a failed write must not leave a claim that turns the retry into a 409."""
+    """Never lost: a failed write must not leave a claim that turns the retry into a 409.
+    Since slice G a storage outage alone queues the reading (202, test_slice_g.py); this
+    covers the case where the outbox cannot take it either."""
     p = reading()
     pg_storage.down = True
+
+    async def outbox_down(*args):
+        raise ConnectionError("metadata DB unreachable")
+
+    repo.queue_reading = outbox_down
     assert send(client, p).status_code == 503
     assert repo.readings == {} and repo.files == {}
     pg_storage.down = False
