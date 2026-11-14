@@ -1,0 +1,20 @@
+# Alertmanager (slice H): groups alerts and delivers them to a webhook.
+# The webhook here is our own receiver (infrastructure/alertmanager/webhook), which keeps
+# the alerts, logs them (so they appear in Loki) and answers GET /alerts. To notify a team
+# channel (Slack, Teams, PagerDuty, e-mail) add a receiver below; nothing else changes.
+
+global:
+  resolve_timeout: 1m
+
+route:
+  receiver: team-webhook
+  group_by: [alertname, category, storage]
+  group_wait: 5s        # collect related alerts for 5 s before the first notification
+  group_interval: 15s
+  repeat_interval: 1h   # remind while still firing
+
+receivers:
+  - name: team-webhook
+    webhook_configs:
+      - url: http://alert-webhook:9099/alerts
+        send_resolved: true

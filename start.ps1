@@ -44,6 +44,11 @@ Ensure DISPECER_PASSWORD ((Rand).Substring(0, 16))
 Ensure ADMIN_PASSWORD ((Rand).Substring(0, 16))
 
 # ---- slice H (observability) secrets: Ensure KEY (Rand) (also in start.sh): add directly below this line ----
+# Login for Grafana (https://localhost/grafana/, user "admin"); read it from .env.
+Ensure GRAFANA_ADMIN_PASSWORD ((Rand).Substring(0, 20))
+# Not a secret: which compose project's container logs go to Loki (its name is the directory's).
+$lokiProject = if ($env:COMPOSE_PROJECT_NAME) { $env:COMPOSE_PROJECT_NAME } else { ((Split-Path -Leaf $PSScriptRoot).ToLower() -replace '[^a-z0-9_-]', '') }
+Ensure LOKI_COMPOSE_PROJECT $lokiProject
 
 # ---- slice I (analytics) secrets: Ensure KEY (Rand) (also in start.sh): add directly below this line ----
 

@@ -1,0 +1,42 @@
+# Prometheus for FileGrid (slice H). Internal only: no host port; Grafana and Alertmanager
+# reach it on the Docker network. Retention is set in docker-compose (2 days).
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    system: filegrid
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # Every backend replica. DNS service discovery: Docker's DNS answers `backend` with the
+  # address of EACH container, so `docker compose up -d --scale backend=N` is picked up
+  # within one refresh interval, with no change to this file (slice J relies on that).
+  - job_name: backend
+    metrics_path: /metrics
+    dns_sd_configs:
+      - names: ["backend"]
+        type: A
+        port: 8000
+        refresh_interval: 5s
+
+  # The teammates' meter simulator exposes its own sim_* metrics, scraped as they are.
+  - job_name: simulator
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["simulator:8080"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]

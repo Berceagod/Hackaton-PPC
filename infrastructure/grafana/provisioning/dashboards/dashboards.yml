@@ -1,0 +1,15 @@
+# Loads every JSON file in /var/lib/grafana/dashboards (mounted from
+# infrastructure/grafana/dashboards). Dashboards are code: edit the JSON (or
+# build_dashboards.py that generates it) and restart Grafana; changes made in the UI are not kept.
+apiVersion: 1
+
+providers:
+  - name: filegrid
+    orgId: 1
+    folder: FileGrid
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

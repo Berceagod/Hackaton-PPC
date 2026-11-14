@@ -1,0 +1,285 @@
+# Unit tests for alerts.yml (slice H). Synthetic series are fed to the REAL rules:
+#   docker run --rm -v "$PWD/infrastructure/prometheus:/t:ro" --entrypoint promtool \
+#     prom/prometheus:v3.5.0 test rules /t/alerts_test.yml
+# (scripts/demo/alert-fire.sh runs this first, then fires real alerts end to end.)
+# Each case proves an alert fires on the situation it describes and stays quiet otherwise.
+
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # ---- integrity: a damaged stored file raises FileIntegrityFailure at once
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_integrity_failures_total{category="outage_records",storage="s3",reason="checksum_mismatch"}'
+        values: '0 0 0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: FileIntegrityFailure
+        exp_alerts: []
+      - eval_time: 90s
+        alertname: FileIntegrityFailure
+        exp_alerts:
+          - exp_labels: { severity: critical, guarantee: "integrity: a corrupt file is never served", category: outage_records, storage: s3, reason: checksum_mismatch }
+            exp_annotations:
+              summary: "A outage_records file failed its integrity check on s3 (checksum_mismatch)"
+              description: "The download was blocked (HTTP 409) and nothing corrupt was served. The stored data is damaged or missing: investigate the storage."
+
+  # ... but corruption in transit (the client resends the chunk) is not paged
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_integrity_failures_total{category="drone_videos",storage="s3",reason="chunk_checksum_mismatch"}'
+        values: '0 0 1 2 3 4 5 6 7 8'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: FileIntegrityFailure
+        exp_alerts: []
+
+  # ---- personal data: any unencrypted connection document is critical after 30 s
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_pii_unencrypted_files'
+        values: '0 0 2 2 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: PersonalDataStoredUnencrypted
+        exp_alerts: []
+      - eval_time: 100s
+        alertname: PersonalDataStoredUnencrypted
+        exp_alerts:
+          - exp_labels: { severity: critical, guarantee: "connection_docs: personal data protected" }
+            exp_annotations:
+              summary: "2 connection document(s) are stored WITHOUT encryption"
+              description: "Someone with direct access to the storage could read personal data. Check the connection_docs policy (encryption must be true) and re-protect or remove the files."
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_pii_unencrypted_files'
+        values: '0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PersonalDataStoredUnencrypted
+        exp_alerts: []
+
+  # ---- meter outbox: readings accepted but not yet in their storage
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_outbox_queued'
+        values: '0 0 5 5 5 5 5 5 5'
+    alert_rule_test:
+      - eval_time: 45s
+        alertname: MeterOutboxBacklog
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: MeterOutboxBacklog
+        exp_alerts:
+          - exp_labels: { severity: warning, guarantee: "meter_readings: never lost" }
+            exp_annotations:
+              summary: "5 accepted reading(s) are not yet in their storage"
+              description: "They are safe in the metadata database and will be written out when the storage is back (outbox)."
+      - eval_time: 2m
+        alertname: MeterOutboxGrowing
+        exp_alerts: []   # 5 readings is not "growing"
+
+  # ---- readings stop arriving: a gap in the data
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_requests_total{category="meter_readings",storage="postgres",operation="ingest",outcome="ok"}'
+        values: '0+150x10 1500x30'     # 10 readings/s for 150 s, then silence
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MeterReadingsNotArriving
+        exp_alerts: []                 # still flowing
+      - eval_time: 7m
+        alertname: MeterReadingsNotArriving
+        exp_alerts:
+          - exp_labels: { severity: critical, guarantee: "meter_readings: never lost" }
+            exp_annotations:
+              summary: "No meter reading accepted for 2 minutes (a gap in the data)"
+              description: "Readings were arriving, now none is accepted. Check the meters/simulator, the gateway and the backend."
+  # no readings ever (a fresh system) is not a "gap"
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_requests_total{category="outage_records",storage="s3",operation="ingest",outcome="ok"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: MeterReadingsNotArriving
+        exp_alerts: []
+
+  # ---- readings failing on the server side
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_requests_total{category="meter_readings",storage="postgres",operation="ingest",outcome="ok"}'
+        values: '0+90x30'
+      - series: 'filegrid_requests_total{category="meter_readings",storage="postgres",operation="ingest",outcome="server_error"}'
+        values: '0+10x30'              # 10% failures
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MeterReadingServerErrors
+        exp_alerts:
+          - exp_labels: { severity: critical, guarantee: "meter_readings: never lost" }
+            exp_annotations:
+              summary: "More than 5% of meter readings fail with a server error (10%)"
+              description: "Meters will retry, but a sustained failure rate puts readings at risk."
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_requests_total{category="meter_readings",storage="postgres",operation="ingest",outcome="ok"}'
+        values: '0+99x30'
+      - series: 'filegrid_requests_total{category="meter_readings",storage="postgres",operation="ingest",outcome="server_error"}'
+        values: '0+1x30'               # 1%: below the threshold
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MeterReadingServerErrors
+        exp_alerts: []
+
+  # ---- duplicates: 20% is a retry storm, the simulator's normal 5% is not
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_requests_total{category="meter_readings",storage="postgres",operation="ingest",outcome="ok"}'
+        values: '0+80x30'
+      - series: 'filegrid_requests_total{category="meter_readings",storage="postgres",operation="ingest",outcome="duplicate"}'
+        values: '0+20x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MeterDuplicateReadingsHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, guarantee: "meter_readings: never duplicated" }
+            exp_annotations:
+              summary: "20% of incoming meter readings are duplicates"
+              description: "They are all rejected (HTTP 409) and none is stored twice, but a sender is re-sending the same readings (retry storm, clock reset or replay)."
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_requests_total{category="meter_readings",storage="postgres",operation="ingest",outcome="ok"}'
+        values: '0+95x30'
+      - series: 'filegrid_requests_total{category="meter_readings",storage="postgres",operation="ingest",outcome="duplicate"}'
+        values: '0+5x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MeterDuplicateReadingsHigh
+        exp_alerts: []
+
+  # ---- meters dropping readings (their backlog is full) = lost for good
+  - interval: 15s
+    input_series:
+      - series: 'sim_dropped_total'
+        values: '0 0 0 0 3 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 80s
+        alertname: MeterReadingsLostAtSender
+        exp_alerts:
+          - exp_labels: { severity: critical, guarantee: "meter_readings: never lost" }
+            exp_annotations:
+              summary: "Meters dropped 3 reading(s): their backlog is full"
+              description: "FileGrid was unreachable for longer than a meter can buffer. Those readings are gone for good."
+
+  # ---- outage records must be available immediately: p95 above 2 s is critical
+  - interval: 15s
+    input_series:      # every request took between 2.5 s and 5 s
+      - series: 'filegrid_request_duration_seconds_bucket{category="outage_records",storage="s3",operation="ingest",le="1"}'
+        values: '0+0x30'
+      - series: 'filegrid_request_duration_seconds_bucket{category="outage_records",storage="s3",operation="ingest",le="2.5"}'
+        values: '0+0x30'
+      - series: 'filegrid_request_duration_seconds_bucket{category="outage_records",storage="s3",operation="ingest",le="5"}'
+        values: '0+10x30'
+      - series: 'filegrid_request_duration_seconds_bucket{category="outage_records",storage="s3",operation="ingest",le="+Inf"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OutageRecordIngestSlow
+        exp_alerts:
+          - exp_labels: { severity: critical, guarantee: "outage_records: available immediately" }
+            exp_annotations:
+              summary: "Saving an outage record takes 4.9 s at p95 (limit 2 s)"
+              description: "A record is acknowledged only after it is stored, so this is how long dispatchers wait for it to exist."
+  - interval: 15s
+    input_series:      # every request took under 1 s
+      - series: 'filegrid_request_duration_seconds_bucket{category="outage_records",storage="s3",operation="ingest",le="1"}'
+        values: '0+10x30'
+      - series: 'filegrid_request_duration_seconds_bucket{category="outage_records",storage="s3",operation="ingest",le="2.5"}'
+        values: '0+10x30'
+      - series: 'filegrid_request_duration_seconds_bucket{category="outage_records",storage="s3",operation="ingest",le="5"}'
+        values: '0+10x30'
+      - series: 'filegrid_request_duration_seconds_bucket{category="outage_records",storage="s3",operation="ingest",le="+Inf"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OutageRecordIngestSlow
+        exp_alerts: []
+  # a slow DRONE video must not trip the outage-record alert (isolation of the signal)
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_request_duration_seconds_bucket{category="drone_videos",storage="s3",operation="ingest",le="5"}'
+        values: '0+0x30'
+      - series: 'filegrid_request_duration_seconds_bucket{category="drone_videos",storage="s3",operation="ingest",le="+Inf"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OutageRecordIngestSlow
+        exp_alerts: []
+
+  # ---- stalled video upload
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_uploads_stalled'
+        values: '0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: VideoUploadStalled
+        exp_alerts: []
+      - eval_time: 110s
+        alertname: VideoUploadStalled
+        exp_alerts:
+          - exp_labels: { severity: warning, guarantee: "drone_videos: transfer survives bad links" }
+            exp_annotations:
+              summary: "1 chunked upload(s) have stalled: no chunk received within the stall threshold (5 min by default)"
+              description: "The upload is resumable: the field team's client should resume it, or it is purged after 24 h. Check the link quality."
+
+  # ---- a storage whose circuit breaker is open
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_breaker_open{storage="ftp"}'
+        values: '0 0 1 1 1 1 1'
+      - series: 'filegrid_breaker_open{storage="s3"}'
+        values: '0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 80s
+        alertname: StorageCircuitOpen
+        exp_alerts:
+          - exp_labels: { severity: warning, storage: ftp, guarantee: "resilience: one storage down must not stop the others" }
+            exp_annotations:
+              summary: "The ftp storage keeps failing: its circuit breaker is open"
+              description: "Files for this storage fail fast; other categories are unaffected and meter readings wait in the outbox."
+
+  # ---- a category that hits its bulkhead limit
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_bulkhead_rejections_total{category="drone_videos"}'
+        values: '0+3x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: CategoryAtCapacity
+        exp_alerts:
+          - exp_labels: { severity: warning, category: drone_videos, guarantee: "scalability: a spike in one category must not hurt the others" }
+            exp_annotations:
+              summary: "drone_videos requests are being refused: the category is at capacity"
+              description: "Its own limit is full (HTTP 503). The other categories are unaffected. Add backend instances or raise its limit."
+
+  # ---- backend instances
+  - interval: 15s
+    input_series:
+      - series: 'up{job="backend",instance="10.0.0.2:8000"}'
+        values: '1 1 1 0 0 0 0 0 0'
+      - series: 'up{job="backend",instance="10.0.0.3:8000"}'
+        values: '1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BackendInstanceDown
+        exp_alerts:
+          - exp_labels: { severity: critical, guarantee: "availability", job: backend, instance: "10.0.0.2:8000" }
+            exp_annotations:
+              summary: "A backend instance (10.0.0.2:8000) cannot be scraped"
+      - eval_time: 2m
+        alertname: NoBackendInstances
+        exp_alerts: []   # the other replica is still up

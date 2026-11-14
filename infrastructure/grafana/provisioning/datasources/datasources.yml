@@ -1,0 +1,39 @@
+# Grafana datasources, provisioned as code (slice H). Fixed uids: dashboards refer to them.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000
+      # Every trace id in a log line becomes a link to all the logs of that one operation.
+      derivedFields:
+        - name: trace
+          matcherType: regex
+          matcherRegex: '"trace_id": "([0-9a-f-]{36})"'
+          url: '{service=~"backend|nginx"} |= "${__value.raw}"'
+          datasourceUid: loki
+          urlDisplayLabel: All logs of this trace
+
+  - name: Alertmanager
+    uid: alertmanager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    editable: false
+    jsonData:
+      implementation: prometheus
