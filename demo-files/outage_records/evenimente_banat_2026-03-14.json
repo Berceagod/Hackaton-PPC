@@ -1,0 +1,27 @@
+{
+  "source": "FileGrid demo",
+  "zone": "Banat",
+  "generated_for": "outage_records",
+  "date": "2026-03-14",
+  "events": [
+    {
+      "event_id": "EVT-BAN-001",
+      "ts": "2026-03-14T06:11:02+02:00",
+      "station": "ST-Timisoara-Vest",
+      "asset": "celula-20kV-07",
+      "type": "trip",
+      "severity": "low",
+      "consumers_affected": 820,
+      "duration_min": 4
+    },
+    {
+      "event_id": "EVT-BAN-002",
+      "ts": "2026-03-14T18:44:19+02:00",
+      "station": "Linie 20kV Timisoara",
+      "asset": "LEA-20-Giroc",
+      "type": "voltage_sag",
+      "severity": "medium",
+      "note": "Corelare cu anomalii contoare (voltage_sag) din simulator"
+    }
+  ]
+}

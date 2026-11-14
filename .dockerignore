@@ -4,3 +4,4 @@
 **/.venv
 **/__pycache__
 frontend/dist
+demo-files/drone_videos/**
