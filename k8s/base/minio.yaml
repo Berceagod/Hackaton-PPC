@@ -1,0 +1,47 @@
+# S3 storage backend: the same MinIO image docker-compose builds from source
+# (filegrid-minio:local, loaded into the cluster by k8s/up.sh).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  labels: {app: minio, tier: storage}
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels: {app: minio}
+  template:
+    metadata:
+      labels: {app: minio, tier: storage}
+    spec:
+      securityContext: {fsGroup: 10001}
+      containers:
+        - name: minio
+          image: filegrid-minio:local
+          imagePullPolicy: Never
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: {secretKeyRef: {name: filegrid-storage, key: MINIO_ROOT_USER}}
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: filegrid-storage, key: MINIO_ROOT_PASSWORD}}
+          ports: [{containerPort: 9000, name: s3}]
+          readinessProbe:
+            httpGet: {path: /minio/health/live, port: 9000}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+          volumeMounts: [{name: data, mountPath: /data}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 10Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  labels: {app: minio}
+spec:
+  selector: {app: minio}
+  ports: [{name: s3, port: 9000, targetPort: 9000}]
