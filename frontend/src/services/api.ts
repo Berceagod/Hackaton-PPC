@@ -921,6 +921,8 @@ export async function getAnalyticsSummary(): Promise<AnalyticsSummary> {
           'PostgreSQL este optim pentru citiri contoare (<50KB) datorită latenței p95 de 11ms și constrângerii de unicitate; S3 Multipart oferă throughput de 4.5x mai mare pentru video-uri dronă >100MB.',
         storm_isolation:
           'La creșterea de 10× a volumului pe contoare/avarii, latența documentelor de racordare și a video-urilor dronă rămâne izolată (+5–7%), confirmând izolarea pe cozi și priorități.',
+        network:
+          'Date de demonstrație. Pe backendul real, detectorul compară tensiunea, evenimentele de tamper și puterea cu sim_label.',
       },
     }
   }

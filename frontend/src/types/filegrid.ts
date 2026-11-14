@@ -105,6 +105,8 @@ export interface AnalyticsSummary {
   narrative: {
     storage_verdict: string
     storm_isolation: string
+    /** Detector versus the simulator's sim_label. Omitted by older mocks. */
+    network?: string
   }
 }
 

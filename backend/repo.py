@@ -183,6 +183,10 @@ class Repo(Protocol):
     async def upload_stall_stats(self, stall_seconds: float) -> tuple[int, int]: ...
 
     # ---- slice I (analytics) Repo protocol methods: add directly below this line ----
+    async def ensure_analytics_schema(self) -> None: ...
+    async def save_measurements(self, kind: str, scenario: str | None, rows: list[dict]) -> None: ...
+    async def latest_measurements(self) -> list[dict]: ...
+    async def analytics_snapshot(self) -> dict: ...
 
     # ---- slice J (scale-out) Repo protocol methods: add directly below this line ----
 
@@ -615,5 +619,165 @@ class PostgresRepo:
         return int(row["in_progress"]), int(row["stalled"])
 
     # ---- slice I (analytics) PostgresRepo methods: add directly below this line ----
+
+    async def ensure_analytics_schema(self) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute(
+                "CREATE TABLE IF NOT EXISTS analytics_measurements ("
+                " id BIGSERIAL PRIMARY KEY,"
+                " run_id UUID NOT NULL,"
+                " kind TEXT NOT NULL,"
+                " scenario TEXT,"
+                " category TEXT NOT NULL,"
+                " storage TEXT NOT NULL,"
+                " samples INT NOT NULL,"
+                " ok INT NOT NULL,"
+                " errors INT NOT NULL,"
+                " latency_avg_ms DOUBLE PRECISION NOT NULL,"
+                " latency_p50_ms DOUBLE PRECISION NOT NULL,"
+                " latency_p95_ms DOUBLE PRECISION NOT NULL,"
+                " latency_p99_ms DOUBLE PRECISION NOT NULL,"
+                " throughput_mbps DOUBLE PRECISION NOT NULL,"
+                " bytes_total BIGINT NOT NULL,"
+                " created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+            )
+            await con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_analytics_measurements_latest "
+                "ON analytics_measurements (kind, scenario, category, storage, created_at DESC)"
+            )
+
+    async def save_measurements(self, kind, scenario, rows) -> None:
+        import uuid as _uuid
+
+        run_id = _uuid.uuid4()
+        async with self._pool.acquire() as con:
+            async with con.transaction():
+                for row in rows:
+                    await con.execute(
+                        "INSERT INTO analytics_measurements (run_id, kind, scenario, category, "
+                        "storage, samples, ok, errors, latency_avg_ms, latency_p50_ms, "
+                        "latency_p95_ms, latency_p99_ms, throughput_mbps, bytes_total) "
+                        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+                        run_id, kind, scenario, row["category"], row["storage"],
+                        row["samples"], row["ok"], row["errors"],
+                        row["latency_avg_ms"], row["latency_p50_ms"],
+                        row["latency_p95_ms"], row["latency_p99_ms"],
+                        row["throughput_mbps"], row["bytes_total"],
+                    )
+
+    async def latest_measurements(self) -> list[dict]:
+        async with self._pool.acquire() as con:
+            found = await con.fetch(
+                "SELECT DISTINCT ON (kind, COALESCE(scenario, ''), category, storage) "
+                "kind, scenario, category, storage, samples, ok, errors, "
+                "latency_avg_ms, latency_p50_ms, latency_p95_ms, latency_p99_ms, "
+                "throughput_mbps, bytes_total "
+                "FROM analytics_measurements "
+                "ORDER BY kind, COALESCE(scenario, ''), category, storage, created_at DESC"
+            )
+        return [
+            {
+                "kind": row["kind"],
+                "scenario": row["scenario"],
+                "category": row["category"],
+                "storage": row["storage"],
+                "samples": int(row["samples"]),
+                "ok": int(row["ok"]),
+                "errors": int(row["errors"]),
+                "latency_avg_ms": float(row["latency_avg_ms"]),
+                "latency_p50_ms": float(row["latency_p50_ms"]),
+                "latency_p95_ms": float(row["latency_p95_ms"]),
+                "latency_p99_ms": float(row["latency_p99_ms"]),
+                "throughput_mbps": float(row["throughput_mbps"]),
+                "bytes_total": int(row["bytes_total"]),
+            }
+            for row in found
+        ]
+
+    async def analytics_snapshot(self) -> dict:
+        # Thresholds match analytics.classify_reading: 50 / 207 / 253 V and 3.5x median power.
+        from analytics import POWER_KW_PATTERN, ZONES, new_snapshot
+
+        snap = new_snapshot()
+        anomaly_sql = """
+            WITH base AS (
+                SELECT
+                    meter_id,
+                    COALESCE(zone, '') AS zone,
+                    NULLIF(sim_label, '') AS sim_label,
+                    voltage_v,
+                    CASE
+                        WHEN jsonb_typeof(payload -> 'events') = 'array' THEN payload -> 'events'
+                        ELSE '[]'::jsonb
+                    END AS events,
+                    CASE
+                        WHEN (payload #>> '{instant,active_power_kw}') ~ 'POWER_KW_PATTERN'
+                        THEN (payload #>> '{instant,active_power_kw}')::double precision
+                        ELSE NULL
+                    END AS power_kw
+                FROM meter_readings
+                WHERE status IN ('stored', 'queued')
+            ),
+            med AS (
+                SELECT meter_id,
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY power_kw) AS med_power
+                FROM base
+                WHERE power_kw IS NOT NULL AND power_kw > 0
+                GROUP BY meter_id
+            ),
+            marked AS (
+                SELECT
+                    b.zone,
+                    b.sim_label,
+                    CASE
+                        WHEN b.voltage_v IS NOT NULL AND b.voltage_v < 50 THEN 'outage'
+                        WHEN b.voltage_v IS NOT NULL AND b.voltage_v < 207 THEN 'voltage_sag'
+                        WHEN b.voltage_v IS NOT NULL AND b.voltage_v > 253 THEN 'overvoltage'
+                        WHEN jsonb_exists_any(
+                            b.events, ARRAY['TAMPER_COVER_OPEN', 'MAGNETIC_FIELD_DETECTED']
+                        ) THEN 'tamper'
+                        WHEN b.power_kw IS NOT NULL AND m.med_power IS NOT NULL AND m.med_power > 0
+                             AND b.power_kw > 3.5 * m.med_power THEN 'load_spike'
+                        ELSE NULL
+                    END AS detected
+                FROM base b
+                LEFT JOIN med m ON m.meter_id = b.meter_id
+            )
+            SELECT
+                zone,
+                count(*) FILTER (WHERE detected IS NOT NULL)::int AS detected,
+                count(*) FILTER (
+                    WHERE sim_label IN ('voltage_sag', 'overvoltage', 'load_spike', 'tamper', 'outage')
+                )::int AS labelled,
+                count(*) FILTER (WHERE detected IS NOT NULL AND detected = sim_label)::int AS confirmed
+            FROM marked
+            GROUP BY zone
+        """.replace("POWER_KW_PATTERN", POWER_KW_PATTERN)
+        async with self._pool.acquire() as con:
+            file_rows = await con.fetch(
+                "SELECT category, zone, count(*)::int AS n FROM files_metadata "
+                "WHERE category IN ('outage_records', 'drone_videos') GROUP BY category, zone"
+            )
+            anomaly_rows = await con.fetch(anomaly_sql)
+            audit_n = await con.fetchval(
+                "SELECT count(*)::int FROM audit_logs a "
+                "JOIN files_metadata f ON f.id = a.file_id "
+                "WHERE f.category = 'connection_docs'"
+            )
+        buckets = {"outage_records": "outages", "drone_videos": "drones"}
+        for row in file_rows:
+            bucket = buckets.get(row["category"])
+            if bucket and row["zone"] in ZONES:
+                snap[bucket][row["zone"]] = int(row["n"])
+        for row in anomaly_rows:
+            snap["totals"]["detected"] += int(row["detected"])
+            snap["totals"]["labelled"] += int(row["labelled"])
+            snap["totals"]["confirmed"] += int(row["confirmed"])
+            if row["zone"] in ZONES:
+                snap["detected"][row["zone"]] = int(row["detected"])
+                snap["labelled"][row["zone"]] = int(row["labelled"])
+                snap["confirmed"][row["zone"]] = int(row["confirmed"])
+        snap["audit_connection_docs"] = int(audit_n or 0)
+        return snap
 
     # ---- slice J (scale-out) PostgresRepo methods: add directly below this line ----

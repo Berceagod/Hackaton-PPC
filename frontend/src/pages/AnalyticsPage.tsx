@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   BarChart,
   Bar,
@@ -19,7 +19,7 @@ import {
 } from 'lucide-react'
 import { getAnalyticsSummary } from '../services/api'
 import type { AnalyticsSummary } from '../types/filegrid'
-import { CATEGORY_LABELS, STORAGE_LABELS } from '../types/filegrid'
+import { CATEGORY_LABELS } from '../types/filegrid'
 import { StorageBadge } from '../components/StorageBadge'
 import type { ToastMessage } from '../components/Toast'
 
@@ -30,17 +30,22 @@ interface AnalyticsPageProps {
 export function AnalyticsPage({ pushToast }: AnalyticsPageProps) {
   const [data, setData] = useState<AnalyticsSummary | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setLoading(true)
+    setError(null)
     void (async () => {
-      setLoading(true)
       try {
         setData(await getAnalyticsSummary())
       } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err)
+        setData(null)
+        setError(detail)
         pushToast({
           kind: 'error',
           title: 'Analytics indisponibil',
-          detail: err instanceof Error ? err.message : String(err),
+          detail,
         })
       } finally {
         setLoading(false)
@@ -48,11 +53,31 @@ export function AnalyticsPage({ pushToast }: AnalyticsPageProps) {
     })()
   }, [pushToast])
 
-  if (loading || !data) {
+  useEffect(() => {
+    load()
+  }, [load])
+
+  if (loading) {
     return (
       <div className="flex items-center gap-2 py-16 text-grid-muted">
         <RefreshCw className="h-4 w-4 animate-spin" />
         Se încarcă statisticile…
+      </div>
+    )
+  }
+
+  if (!data) {
+    return (
+      <div className="space-y-3 py-16">
+        <p className="text-sm text-grid-muted">Analytics indisponibil. {error}</p>
+        <button
+          type="button"
+          onClick={load}
+          className="inline-flex items-center gap-2 rounded-lg border border-grid-border px-3 py-1.5 text-sm text-grid-text"
+        >
+          <RefreshCw className="h-4 w-4" />
+          Reîncearcă
+        </button>
       </div>
     )
   }
@@ -67,11 +92,21 @@ export function AnalyticsPage({ pushToast }: AnalyticsPageProps) {
 
   return (
     <div className="animate-fade-in space-y-8">
-      <div>
-        <h2 className="text-xl font-bold text-grid-text">Statistici & Insights Decizionale</h2>
-        <p className="mt-1 text-sm text-grid-muted">
-          Dashboard pentru managementul Rețele Electrice România
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-bold text-grid-text">Statistici & Insights Decizionale</h2>
+          <p className="mt-1 text-sm text-grid-muted">
+            Dashboard pentru managementul Rețele Electrice România
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={load}
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-grid-border px-3 py-1.5 text-sm text-grid-text"
+        >
+          <RefreshCw className="h-4 w-4" />
+          Reîncarcă
+        </button>
       </div>
 
       {/* Section A */}
@@ -110,7 +145,7 @@ export function AnalyticsPage({ pushToast }: AnalyticsPageProps) {
                     {row.latency_p95_ms} ms
                   </td>
                   <td className="px-4 py-3 font-mono text-xs text-grid-cyan">
-                    {row.throughput_mbps.toFixed(1)} MB/s
+                    {formatThroughput(row.throughput_mbps)}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs">
                     {(row.error_rate * 100).toFixed(1)}%
@@ -245,13 +280,16 @@ export function AnalyticsPage({ pushToast }: AnalyticsPageProps) {
             .sort((a, b) => b.outages_reported - a.outages_reported)
             .map((z) => `${z.zone} (${z.outages_reported})`)
             .join(' → ')}
-          . Anomalii tipice: variații de tensiune pe circuitele de joasă tensiune.
-          Storage recomandat pe categorie: {STORAGE_LABELS.postgres} (contoare),{' '}
-          {STORAGE_LABELS.s3} (avarii/dronă), {STORAGE_LABELS.ftp} (racordări).
+          .{data.narrative.network ? ` ${data.narrative.network}` : ''}
         </p>
       </section>
     </div>
   )
+}
+
+function formatThroughput(mbps: number): string {
+  if (mbps >= 0.1) return `${mbps.toFixed(1)} MB/s`
+  return `${(mbps * 1000).toFixed(1)} KB/s`
 }
 
 function statusLabel(s: 'completed' | 'in_progress' | 'pending'): string {

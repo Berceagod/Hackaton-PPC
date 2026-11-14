@@ -81,3 +81,22 @@ Conținut criptat alterat în storage -> download `409` cu `reason: "decryption_
 - Citire de contor când storage-ul ei e căzut: `202 { ..., "status": "queued" }`. Citirea e păstrată durabil (outbox) și scrisă în storage automat când acesta revine; retrimisă între timp -> `409`. Apare în `/files` după ce e scrisă.
 - `503` + `Retry-After: 1` pe `/ingest` și `/upload/chunk` când categoria e la capacitate maximă (bulkhead); clientul reîncearcă.
 - O politică salvată se aplică imediat în toate procesele backend (Postgres NOTIFY).
+
+## Analytics (slice I, ADR-0020, ADR-0021)
+
+11. `GET /analytics/summary` (dispecer sau admin; tokenul de simulator -> `403`)
+    -> `200` cu forma `AnalyticsSummary` din `frontend/src/types/filegrid.ts`:
+    `storage_matrix` (câte un rând pe categorie, pe storage-ul din politica curentă: latență medie, p95, throughput MB/s, rată de erori, verdict),
+    `load_comparison` (exact două puncte: `Zi normală` și `Vârf furtună (10x)`, p95 în ms pe fiecare categorie),
+    `zone_insights` (Muntenia, Banat, Dobrogea: avarii, anomalii de contor, inspecții dronă, `drone_status`),
+    `narrative.storage_verdict`, `narrative.storm_isolation`, `narrative.network`.
+    Prometheus (`PROMETHEUS_URL`, implicit `http://prometheus:9090`) umple tabelul când răspunde. Când nu răspunde, tabelul folosește ultimul benchmark, iar endpoint-ul rămâne `200`.
+
+12. `POST /analytics/measurements` (dispecer sau admin) -> `204`.
+    Body: `{ "kind": "benchmark" | "scenario", "scenario": "normal" | "peak" (doar pentru scenario), "rows": [ { "category", "storage", "samples", "ok", "errors", "latency_avg_ms", "latency_p50_ms", "latency_p95_ms", "latency_p99_ms", "throughput_mbps", "bytes_total" } ] }`.
+    `ok + errors` trebuie să fie `samples`. Invalid -> `422` și nu se scrie nimic.
+    O rulare nouă o înlocuiește pe cea veche pentru aceeași categorie și același storage.
+    O scriu `scripts/benchmark/run.sh` (compară postgres, s3 și ftp, apoi restaurează politica) și `scripts/scenarios/normal-day.sh`, `peak-day.sh`, `storm.sh`.
+
+Verdictul de storage vine din benchmark, nu din politica implicită: pentru citiri, avarii și documente câștigă p95-ul cel mai mic; pentru video-uri, throughput-ul cel mai mare. `narrative.network` spune câte citiri a marcat detectorul și câte coincid cu `sim_label`.
+

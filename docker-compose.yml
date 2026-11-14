@@ -28,6 +28,9 @@ x-backend-env: &backend-env
   PROMETHEUS_UPLOAD_STALL_SECONDS: ${PROMETHEUS_UPLOAD_STALL_SECONDS:-300}
 
   # ---- slice I (analytics) backend env: add directly below this line ----
+  PROMETHEUS_URL: ${PROMETHEUS_URL:-http://prometheus:9090}
+  ANALYTICS_RANGE: ${ANALYTICS_RANGE:-5m}
+  ANALYTICS_TIMEOUT_SECONDS: ${ANALYTICS_TIMEOUT_SECONDS:-2}
 
   # ---- slice J (scale-out) backend env: add directly below this line ----
 
