@@ -178,6 +178,12 @@ class Repo(Protocol):
     async def list_stale_uploads(self, older_than_seconds: float) -> list[tuple[str, int]]: ...
     async def delete_upload(self, upload_id: str) -> None: ...
 
+    # ---- slice H (observability) Repo protocol methods: add directly below this line ----
+
+    # ---- slice I (analytics) Repo protocol methods: add directly below this line ----
+
+    # ---- slice J (scale-out) Repo protocol methods: add directly below this line ----
+
 
 _COLS = (
     "id, filename, category, storage, storage_key, size_bytes, sha256, encrypted, "
@@ -582,3 +588,9 @@ class PostgresRepo:
             return True
         except Exception:
             return False
+
+    # ---- slice H (observability) PostgresRepo methods: add directly below this line ----
+
+    # ---- slice I (analytics) PostgresRepo methods: add directly below this line ----
+
+    # ---- slice J (scale-out) PostgresRepo methods: add directly below this line ----

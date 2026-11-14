@@ -43,6 +43,12 @@ Set-Content -LiteralPath .env -Value $envLines -Encoding ascii
 Ensure DISPECER_PASSWORD ((Rand).Substring(0, 16))
 Ensure ADMIN_PASSWORD ((Rand).Substring(0, 16))
 
+# ---- slice H (observability) secrets: Ensure KEY (Rand) (also in start.sh): add directly below this line ----
+
+# ---- slice I (analytics) secrets: Ensure KEY (Rand) (also in start.sh): add directly below this line ----
+
+# ---- slice J (scale-out) secrets: Ensure KEY (Rand) (also in start.sh): add directly below this line ----
+
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Host "Docker is not installed. Install Docker Desktop, start it, then re-run .\start.ps1" -ForegroundColor Red
     exit 1

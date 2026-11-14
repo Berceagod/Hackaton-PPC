@@ -52,6 +52,12 @@ class Settings:
     breaker_cooldown_seconds: float = 5.0
     upload_ttl_hours: float = 24.0         # abandoned chunked uploads are purged after this
 
+    # ---- slice H (observability) settings (always with a default): add directly below this line ----
+
+    # ---- slice I (analytics) settings (always with a default): add directly below this line ----
+
+    # ---- slice J (scale-out) settings (always with a default): add directly below this line ----
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -81,6 +87,12 @@ class Settings:
             breaker_threshold=int(os.environ.get("BREAKER_THRESHOLD", "3")),
             breaker_cooldown_seconds=float(os.environ.get("BREAKER_COOLDOWN_SECONDS", "5")),
             upload_ttl_hours=float(os.environ.get("UPLOAD_TTL_HOURS", "24")),
+
+            # ---- slice H (observability) from_env lines: add directly below this line ----
+
+            # ---- slice I (analytics) from_env lines: add directly below this line ----
+
+            # ---- slice J (scale-out) from_env lines: add directly below this line ----
             users={
                 "dispecer@ppc.ro": {
                     "password": _req("DISPECER_PASSWORD"),

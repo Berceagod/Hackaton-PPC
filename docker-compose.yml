@@ -20,6 +20,12 @@ x-backend-env: &backend-env
   FILEGRID_MASTER_KEY: ${FILEGRID_MASTER_KEY:?run ./start.sh}
   POLICIES_PATH: /app/policies.yaml
 
+  # ---- slice H (observability) backend env: add directly below this line ----
+
+  # ---- slice I (analytics) backend env: add directly below this line ----
+
+  # ---- slice J (scale-out) backend env: add directly below this line ----
+
 services:
   nginx:
     build:
@@ -164,6 +170,11 @@ services:
     networks: [internal]
     restart: unless-stopped
 
+  # ---- slice H (observability) services: add directly below this line ----
+
+  # ---- slice I (analytics) services: add directly below this line ----
+
+  # ---- slice J (scale-out) services: add directly below this line ----
 networks:
   edge: {}
   internal:
@@ -176,3 +187,9 @@ volumes:
   pgblob: {}
   miniodata: {}
   ftpdata: {}
+
+  # ---- slice H (observability) volumes: add directly below this line ----
+
+  # ---- slice I (analytics) volumes: add directly below this line ----
+
+  # ---- slice J (scale-out) volumes: add directly below this line ----

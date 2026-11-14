@@ -22,6 +22,12 @@ from storage.postgres_storage import PostgresStorage
 from storage.s3_storage import S3Storage
 from tracing import TraceMiddleware
 
+# ---- slice H (observability) imports: add directly below this line ----
+
+# ---- slice I (analytics) imports: add directly below this line ----
+
+# ---- slice J (scale-out) imports: add directly below this line ----
+
 log = logging.getLogger("filegrid.main")
 
 PURGE_INTERVAL_SECONDS = 900
@@ -99,6 +105,12 @@ def create_app(deps: Deps | None = None) -> FastAPI:
         if deps is None:  # real service: background workers (tests drive them directly)
             tasks = [asyncio.create_task(run_drainer(app.state.deps, stop)),
                      asyncio.create_task(_purge_loop(app.state.deps, stop))]
+
+            # ---- slice H (observability) background tasks: tasks.append(...): add directly below this line ----
+
+            # ---- slice I (analytics) background tasks: tasks.append(...): add directly below this line ----
+
+            # ---- slice J (scale-out) background tasks: tasks.append(...): add directly below this line ----
         log.info("backend ready")
         yield
         stop.set()
@@ -110,6 +122,12 @@ def create_app(deps: Deps | None = None) -> FastAPI:
 
     app = FastAPI(title="FileGrid API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(TraceMiddleware)
+
+    # ---- slice H (observability) middleware / app-level routes (e.g. /metrics): add directly below this line ----
+
+    # ---- slice I (analytics) middleware / app-level routes (e.g. /metrics): add directly below this line ----
+
+    # ---- slice J (scale-out) middleware / app-level routes (e.g. /metrics): add directly below this line ----
     app.include_router(health.router)  # /livez, /health: internal only (docker, prometheus)
     for prefix in ("/api/v1",):
         app.include_router(health.api_router, prefix=prefix)  # /health needs a user here
@@ -117,6 +135,12 @@ def create_app(deps: Deps | None = None) -> FastAPI:
         app.include_router(admin.router, prefix=prefix)
         app.include_router(files.router, prefix=prefix)
         app.include_router(uploads.router, prefix=prefix)
+
+        # ---- slice H (observability) routers under /api/v1: add directly below this line ----
+
+        # ---- slice I (analytics) routers under /api/v1: add directly below this line ----
+
+        # ---- slice J (scale-out) routers under /api/v1: add directly below this line ----
     return app
 
 

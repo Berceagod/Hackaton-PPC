@@ -224,6 +224,12 @@ class FakeRepo:
     async def healthy(self):
         return True
 
+    # ---- slice H (observability) FakeRepo methods: add directly below this line ----
+
+    # ---- slice I (analytics) FakeRepo methods: add directly below this line ----
+
+    # ---- slice J (scale-out) FakeRepo methods: add directly below this line ----
+
 
 SETTINGS = Settings(
     jwt_secret="test-secret-test-secret-test-secret",
@@ -304,3 +310,10 @@ def auth(client):
         "/api/v1/auth/login", json={"email": "dispecer@ppc.ro", "password": "pw-d"}
     ).json()["token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+# ---- slice H (observability) fixtures: add directly below this line ----
+
+# ---- slice I (analytics) fixtures: add directly below this line ----
+
+# ---- slice J (scale-out) fixtures: add directly below this line ----

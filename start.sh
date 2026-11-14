@@ -37,6 +37,12 @@ sed -i -e '/^DISPECER_PASSWORD=dispecer$/d' -e '/^ADMIN_PASSWORD=admin$/d' .env
 ensure DISPECER_PASSWORD "$(rand | head -c 16)"
 ensure ADMIN_PASSWORD "$(rand | head -c 16)"
 
+# ---- slice H (observability) secrets: ensure KEY "$(rand)" (also in start.ps1): add directly below this line ----
+
+# ---- slice I (analytics) secrets: ensure KEY "$(rand)" (also in start.ps1): add directly below this line ----
+
+# ---- slice J (scale-out) secrets: ensure KEY "$(rand)" (also in start.ps1): add directly below this line ----
+
 echo ">> Building and starting FileGrid"
 docker compose up -d --build "$@"
 
