@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --color-grid-bg: #0b1220;
+  --color-grid-surface: #121a2b;
+  --color-grid-panel: #182338;
+  --color-grid-border: #243049;
+  --color-grid-muted: #8b9bb8;
+  --color-grid-text: #e8eef8;
+  --color-grid-blue: #1d9bf0;
+  --color-grid-cyan: #22d3ee;
+  --color-grid-amber: #f59e0b;
+  --color-grid-green: #34d399;
+  --color-grid-red: #f87171;
+  --color-grid-postgres: #3b82f6;
+  --color-grid-s3: #f59e0b;
+  --color-grid-ftp: #a78bfa;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(29, 155, 240, 0.18), transparent 55%),
+    radial-gradient(900px 500px at 90% 0%, rgba(34, 211, 238, 0.1), transparent 50%),
+    linear-gradient(180deg, #0b1220 0%, #0e1626 50%, #0b1220 100%);
+  color: var(--color-grid-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(29, 155, 240, 0.35);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.35s ease-out both;
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 2s ease-in-out infinite;
+}
+
+.animate-slide-in {
+  animation: slide-in-right 0.28s ease-out both;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #2a3a55;
+  border-radius: 999px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
