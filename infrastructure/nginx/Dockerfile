@@ -16,7 +16,8 @@ RUN apk add --no-cache openssl
 RUN rm -f /etc/nginx/conf.d/default.conf
 COPY infrastructure/nginx/default.conf /etc/nginx/conf.d/filegrid.conf
 COPY infrastructure/nginx/40-gen-cert.sh /docker-entrypoint.d/40-gen-cert.sh
-RUN chmod +x /docker-entrypoint.d/40-gen-cert.sh
+# Strip CRLF so the script runs on Alpine even when built from Windows checkouts
+RUN sed -i 's/\r$//' /docker-entrypoint.d/40-gen-cert.sh && chmod +x /docker-entrypoint.d/40-gen-cert.sh
 COPY --from=frontend /app/dist /usr/share/nginx/html
 EXPOSE 80 443
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=5 \
