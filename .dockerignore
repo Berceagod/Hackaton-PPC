@@ -4,4 +4,7 @@
 **/.venv
 **/__pycache__
 frontend/dist
+<<<<<<< HEAD
 demo-files/drone_videos/**
+=======
+>>>>>>> 8dd17c1973f4105dc90f3e1a38a3b18fcb04c93d
