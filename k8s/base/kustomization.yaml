@@ -1,0 +1,21 @@
+# FileGrid on Kubernetes (slice J). Apply with: kubectl apply -k k8s/base
+# Secrets (passwords, keys, TLS) and the policies ConfigMap are NOT in the repo: k8s/up.sh
+# creates them from the machine's .env and policies.yaml before applying this.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: filegrid
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - minio.yaml
+  - ftp.yaml
+  - backend.yaml
+  - gateway.yaml
+  - simulator.yaml
+  - network-policies.yaml
+configMapGenerator:
+  - name: filegrid-gateway-conf
+    files:
+      - filegrid.conf=nginx.conf
+generatorOptions:
+  disableNameSuffixHash: true

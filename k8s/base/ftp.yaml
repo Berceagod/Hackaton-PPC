@@ -1,0 +1,94 @@
+# FTP storage backend (pure-ftpd, same image and settings as docker-compose).
+# Passive mode: the server tells clients to connect back to PUBLICHOST "ftp" (this
+# Service's ClusterIP) on a port from FTP_PASSIVE_PORTS, so every passive port is declared
+# on the Service. 40 ports = 40 concurrent transfers.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ftp
+  labels: {app: ftp, tier: storage}
+spec:
+  serviceName: ftp
+  replicas: 1
+  selector:
+    matchLabels: {app: ftp}
+  template:
+    metadata:
+      labels: {app: ftp, tier: storage}
+    spec:
+      containers:
+        - name: ftp
+          image: stilliard/pure-ftpd:latest
+          env:
+            - {name: PUBLICHOST, value: ftp}
+            - {name: FTP_USER_HOME, value: /home/filegrid}
+            - {name: FTP_MAX_CLIENTS, value: "40"}
+            - {name: FTP_MAX_CONNECTIONS, value: "40"}
+            - {name: FTP_PASSIVE_PORTS, value: "30000:30039"}
+            - name: FTP_USER_NAME
+              valueFrom: {secretKeyRef: {name: filegrid-storage, key: FTP_USER}}
+            - name: FTP_USER_PASS
+              valueFrom: {secretKeyRef: {name: filegrid-storage, key: FTP_PASSWORD}}
+          ports:
+            - {containerPort: 21, name: ftp}
+          readinessProbe:
+            tcpSocket: {port: 21}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+          volumeMounts: [{name: data, mountPath: /home/filegrid}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 5Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ftp
+  labels: {app: ftp}
+spec:
+  selector: {app: ftp}
+  ports:
+    - {name: ftp, port: 21, targetPort: 21}
+    - {name: pasv-0, port: 30000, targetPort: 30000}
+    - {name: pasv-1, port: 30001, targetPort: 30001}
+    - {name: pasv-2, port: 30002, targetPort: 30002}
+    - {name: pasv-3, port: 30003, targetPort: 30003}
+    - {name: pasv-4, port: 30004, targetPort: 30004}
+    - {name: pasv-5, port: 30005, targetPort: 30005}
+    - {name: pasv-6, port: 30006, targetPort: 30006}
+    - {name: pasv-7, port: 30007, targetPort: 30007}
+    - {name: pasv-8, port: 30008, targetPort: 30008}
+    - {name: pasv-9, port: 30009, targetPort: 30009}
+    - {name: pasv-10, port: 30010, targetPort: 30010}
+    - {name: pasv-11, port: 30011, targetPort: 30011}
+    - {name: pasv-12, port: 30012, targetPort: 30012}
+    - {name: pasv-13, port: 30013, targetPort: 30013}
+    - {name: pasv-14, port: 30014, targetPort: 30014}
+    - {name: pasv-15, port: 30015, targetPort: 30015}
+    - {name: pasv-16, port: 30016, targetPort: 30016}
+    - {name: pasv-17, port: 30017, targetPort: 30017}
+    - {name: pasv-18, port: 30018, targetPort: 30018}
+    - {name: pasv-19, port: 30019, targetPort: 30019}
+    - {name: pasv-20, port: 30020, targetPort: 30020}
+    - {name: pasv-21, port: 30021, targetPort: 30021}
+    - {name: pasv-22, port: 30022, targetPort: 30022}
+    - {name: pasv-23, port: 30023, targetPort: 30023}
+    - {name: pasv-24, port: 30024, targetPort: 30024}
+    - {name: pasv-25, port: 30025, targetPort: 30025}
+    - {name: pasv-26, port: 30026, targetPort: 30026}
+    - {name: pasv-27, port: 30027, targetPort: 30027}
+    - {name: pasv-28, port: 30028, targetPort: 30028}
+    - {name: pasv-29, port: 30029, targetPort: 30029}
+    - {name: pasv-30, port: 30030, targetPort: 30030}
+    - {name: pasv-31, port: 30031, targetPort: 30031}
+    - {name: pasv-32, port: 30032, targetPort: 30032}
+    - {name: pasv-33, port: 30033, targetPort: 30033}
+    - {name: pasv-34, port: 30034, targetPort: 30034}
+    - {name: pasv-35, port: 30035, targetPort: 30035}
+    - {name: pasv-36, port: 30036, targetPort: 30036}
+    - {name: pasv-37, port: 30037, targetPort: 30037}
+    - {name: pasv-38, port: 30038, targetPort: 30038}
+    - {name: pasv-39, port: 30039, targetPort: 30039}

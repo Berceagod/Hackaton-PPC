@@ -1,0 +1,36 @@
+# The smart-meter simulator, unchanged: it talks to FileGrid through the gateway like a real
+# meter, verifying the gateway's TLS certificate (only the public cert is mounted).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simulator
+  labels: {app: simulator, tier: client}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: simulator}
+  template:
+    metadata:
+      labels: {app: simulator, tier: client}
+    spec:
+      containers:
+        - name: simulator
+          image: filegrid/simulator:k8s
+          imagePullPolicy: Never
+          env:
+            - {name: API_URL, value: "https://nginx/api/v1/ingest"}
+            - {name: VERIFY_TLS, value: /certs/tls.crt}
+            - {name: INGEST_MODE, value: multipart}
+            - {name: BASE_RATE, value: "10"}
+            - {name: STORM_MULTIPLIER, value: "10"}
+            - name: API_TOKEN
+              valueFrom: {secretKeyRef: {name: filegrid-simulator, key: API_TOKEN}}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+          volumeMounts:
+            - {name: ca, mountPath: /certs, readOnly: true}
+      volumes:
+        - name: ca
+          secret:
+            secretName: filegrid-tls
+            items: [{key: tls.crt, path: tls.crt}]   # the public certificate only

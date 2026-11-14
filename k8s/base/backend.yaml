@@ -1,0 +1,70 @@
+# FileGrid backend: stateless, so it scales horizontally. The HorizontalPodAutoscaler adds
+# pods when CPU passes 70% of the request (2 to 6 pods); every pod serves every request
+# (shared state only in Postgres and the storages, ADR-0013/0026).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels: {app: backend, tier: app}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: backend}
+  template:
+    metadata:
+      labels: {app: backend, tier: app}
+    spec:
+      containers:
+        - name: backend
+          image: filegrid/backend:k8s
+          imagePullPolicy: Never
+          envFrom:
+            - secretRef: {name: filegrid-backend}   # URLs with passwords, keys, tokens (k8s/up.sh)
+          env:
+            - {name: UVICORN_WORKERS, value: "2"}
+            - {name: S3_ENDPOINT, value: "http://minio:9000"}
+            - {name: S3_BUCKET, value: filegrid}
+            - {name: FTP_HOST, value: ftp}
+            - {name: FTP_PORT, value: "21"}
+            - {name: POLICIES_PATH, value: /config/policies.yaml}
+          ports: [{containerPort: 8000, name: http}]
+          readinessProbe:
+            httpGet: {path: /livez, port: 8000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /livez, port: 8000}
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 250m, memory: 192Mi}
+            limits: {cpu: "2", memory: 512Mi}
+          volumeMounts: [{name: policies, mountPath: /config, readOnly: true}]
+      volumes:
+        - name: policies
+          configMap: {name: filegrid-policies}   # from the repo's policies.yaml (k8s/up.sh)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  labels: {app: backend}
+spec:
+  selector: {app: backend}
+  ports: [{name: http, port: 8000, targetPort: 8000}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: backend}
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 60

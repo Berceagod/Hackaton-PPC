@@ -1,0 +1,95 @@
+# Two separate PostgreSQL instances, as in docker-compose: metadata (files, readings,
+# audit, policies) and the DATABASE storage backend (file blobs).
+# max_connections=200: the backend autoscales to 6 pods x 2 workers x (6 + 4) pooled
+# connections (HPA in backend.yaml), above PostgreSQL's default of 100.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-meta
+  labels: {app: postgres-meta, tier: storage}
+spec:
+  serviceName: postgres-meta
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres-meta}
+  template:
+    metadata:
+      labels: {app: postgres-meta, tier: storage}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          args: ["-c", "max_connections=200"]
+          env:
+            - {name: POSTGRES_USER, value: filegrid}
+            - {name: POSTGRES_DB, value: filegrid}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: filegrid-storage, key: POSTGRES_META_PASSWORD}}
+          ports: [{containerPort: 5432, name: postgres}]
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "filegrid", "-d", "filegrid"]}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 2Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-meta
+  labels: {app: postgres-meta}
+spec:
+  selector: {app: postgres-meta}
+  ports: [{name: postgres, port: 5432, targetPort: 5432}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-blob
+  labels: {app: postgres-blob, tier: storage}
+spec:
+  serviceName: postgres-blob
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres-blob}
+  template:
+    metadata:
+      labels: {app: postgres-blob, tier: storage}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          args: ["-c", "max_connections=200"]
+          env:
+            - {name: POSTGRES_USER, value: filegrid}
+            - {name: POSTGRES_DB, value: filegrid_blob}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: filegrid-storage, key: POSTGRES_BLOB_PASSWORD}}
+          ports: [{containerPort: 5432, name: postgres}]
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "filegrid", "-d", "filegrid_blob"]}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 5Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-blob
+  labels: {app: postgres-blob}
+spec:
+  selector: {app: postgres-blob}
+  ports: [{name: postgres, port: 5432, targetPort: 5432}]
