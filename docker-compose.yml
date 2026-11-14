@@ -1,0 +1,149 @@
+# FileGrid — slice A stack. Start with ./start.sh (generates .env secrets first).
+# Only nginx publishes host ports; every storage lives on the internal network.
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql://filegrid:${POSTGRES_META_PASSWORD:?run ./start.sh}@postgres-meta:5432/filegrid
+  S3_ENDPOINT: http://minio:9000
+  S3_ACCESS_KEY: ${MINIO_ROOT_USER:?run ./start.sh}
+  S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?run ./start.sh}
+  S3_BUCKET: filegrid
+  BLOB_DATABASE_URL: postgresql://filegrid:${POSTGRES_BLOB_PASSWORD:?run ./start.sh}@postgres-blob:5432/filegrid_blob
+  FTP_HOST: ftp
+  FTP_PORT: "21"
+  FTP_USER: ${FTP_USER:?run ./start.sh}
+  FTP_PASSWORD: ${FTP_PASSWORD:?run ./start.sh}
+  JWT_SECRET: ${JWT_SECRET:?run ./start.sh}
+  SIMULATOR_TOKEN: ${SIMULATOR_TOKEN:?run ./start.sh}
+  DISPECER_PASSWORD: ${DISPECER_PASSWORD:?run ./start.sh}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:?run ./start.sh}
+  POLICIES_PATH: /app/policies.yaml
+
+services:
+  nginx:
+    build:
+      context: .
+      dockerfile: infrastructure/nginx/Dockerfile
+      args:
+        VITE_USE_MOCK: "false"
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - gateway-ca:/etc/nginx/ca      # public cert only (see 40-gen-cert.sh)
+    networks: [edge, internal]
+    restart: unless-stopped
+
+  simulator:            # teammates' smart-meter simulator; talks to FileGrid like a real meter
+    build: ./simulator
+    environment:
+      API_URL: https://nginx/api/v1/ingest
+      API_TOKEN: ${SIMULATOR_TOKEN:?run ./start.sh}
+      VERIFY_TLS: /certs/tls.crt      # verify the gateway certificate (not "false")
+      INGEST_MODE: multipart
+      BASE_RATE: ${SIM_BASE_RATE:-10}
+      STORM_MULTIPLIER: ${SIM_STORM_MULTIPLIER:-10}
+      METER_COUNT: ${SIM_METER_COUNT:-1000}
+      DUPLICATE_RATIO: ${SIM_DUPLICATE_RATIO:-0.05}
+      ANOMALY_RATIO: ${SIM_ANOMALY_RATIO:-0.02}
+      START_MODE: ${SIM_START_MODE:-normal}
+    volumes:
+      - gateway-ca:/certs:ro
+    depends_on:
+      nginx:
+        condition: service_healthy
+    networks: [internal]
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    environment: *backend-env
+    volumes:
+      - ./policies.yaml:/app/policies.yaml:ro
+    depends_on:
+      postgres-meta:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      # started (not healthy): a down storage must never block the backend or other categories
+      postgres-blob:
+        condition: service_started
+      ftp:
+        condition: service_started
+    networks: [internal]
+    restart: unless-stopped
+
+  postgres-meta:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: filegrid
+      POSTGRES_PASSWORD: ${POSTGRES_META_PASSWORD:?run ./start.sh}
+      POSTGRES_DB: filegrid
+    volumes:
+      - pgmeta:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filegrid -d filegrid"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+    restart: unless-stopped
+
+  minio:
+    build: ./infrastructure/minio   # built from source: upstream no longer publishes images
+    image: filegrid-minio:local
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?run ./start.sh}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?run ./start.sh}
+    volumes:
+      - miniodata:/data
+    networks: [internal]
+    restart: unless-stopped
+
+  postgres-blob:        # DATABASE storage backend (separate instance from the metadata DB)
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: filegrid
+      POSTGRES_PASSWORD: ${POSTGRES_BLOB_PASSWORD:?run ./start.sh}
+      POSTGRES_DB: filegrid_blob
+    volumes:
+      - pgblob:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filegrid -d filegrid_blob"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+    restart: unless-stopped
+
+  ftp:                  # FTP storage backend (pure-ftpd), internal network only
+    image: stilliard/pure-ftpd:latest
+    environment:
+      PUBLICHOST: ftp
+      FTP_USER_NAME: ${FTP_USER:?run ./start.sh}
+      FTP_USER_PASS: ${FTP_PASSWORD:?run ./start.sh}
+      FTP_USER_HOME: /home/filegrid
+      # The image defaults to 5 sessions, far too few for a storage backend. Each
+      # backend instance holds at most FTP_MAX_CONCURRENCY (8) sessions, so 60 leaves
+      # room for several replicas; one passive port is needed per transfer.
+      FTP_MAX_CLIENTS: "60"
+      FTP_MAX_CONNECTIONS: "60"
+      FTP_PASSIVE_PORTS: "30000:30099"
+    volumes:
+      - ftpdata:/home/filegrid
+    networks: [internal]
+    restart: unless-stopped
+
+networks:
+  edge: {}
+  internal:
+    internal: true   # no route to/from the host: storages are unreachable from outside
+
+volumes:
+  gateway-ca: {}
+  pgmeta: {}
+  pgblob: {}
+  miniodata: {}
+  ftpdata: {}
