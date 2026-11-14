@@ -1,0 +1,21 @@
+categories:
+  meter_readings:
+    storage: postgres
+    encryption: false
+    deduplicate: true
+    priority: normal
+  outage_records:
+    storage: s3
+    encryption: false
+    deduplicate: false
+    priority: high
+  connection_docs:
+    storage: ftp
+    encryption: true
+    deduplicate: false
+    priority: normal
+  drone_videos:
+    storage: s3
+    encryption: false
+    deduplicate: false
+    priority: low
