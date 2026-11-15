@@ -24,6 +24,7 @@ from integrity import HashingStream, sha256_of_stream, upload_chunks
 import metrics
 from logging_setup import trace_id_var
 from meter_ingest import ingest_meter_reading
+import failover
 import keystore
 import replication
 from keystore import FileErased
@@ -116,6 +117,12 @@ async def _ingest(request, file, category, metadata, idempotency_key, principal)
         return await ingest_meter_reading(deps, file, idempotency_key, principal, trace_id)
 
     policy, storage = await _storage_for(deps, category)
+    # automatic failover: primary down, or its category overloaded -> the fallback storage
+    chosen, why = failover.choose(deps, category, policy)
+    if why:
+        storage = deps.storages[chosen]
+        metrics.failover_file(category, why)
+    await failover.note(deps, category, policy, chosen, why)
     metrics.note(storage=storage.name)
     file_id = str(uuid.uuid4())
     key = f"{category}/{file_id}"

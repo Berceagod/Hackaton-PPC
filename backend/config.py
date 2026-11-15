@@ -87,6 +87,8 @@ class Settings:
     testing_enabled: bool = False
     testing_self_url: str = "http://127.0.0.1:8000"
     simulator_url: str = "http://simulator:8080"
+    # automatic failover: a category whose bulkhead is more than this full counts as overloaded
+    failover_load_threshold: float = 0.6
     # login lockout with backoff (improvements.md 2.5): after N consecutive failures an account
     # is refused for base * 2^(failures-N) seconds, at most `max`
     login_max_failures: int = 5
@@ -151,6 +153,7 @@ class Settings:
             testing_enabled=os.environ.get("TESTING_ENABLED", "false").strip().lower() in ("1", "true", "yes"),
             testing_self_url=os.environ.get("TESTING_SELF_URL", "http://127.0.0.1:8000"),
             simulator_url=os.environ.get("SIMULATOR_URL", "http://simulator:8080"),
+            failover_load_threshold=float(os.environ.get("FAILOVER_LOAD_THRESHOLD", "0.6")),
             login_max_failures=int(os.environ.get("LOGIN_MAX_FAILURES", "5")),
             login_lock_base_seconds=float(os.environ.get("LOGIN_LOCK_BASE_SECONDS", "30")),
             login_lock_max_seconds=float(os.environ.get("LOGIN_LOCK_MAX_SECONDS", "900")),

@@ -102,6 +102,18 @@ BREAKER_OPEN = Gauge(
     multiprocess_mode="livemax",
 )
 
+FAILOVER_ACTIVE = Gauge(
+    "filegrid_failover_active",
+    "1 while new files of a category are routed to its fallback storage",
+    ["category"],
+    multiprocess_mode="livemax",
+)
+FAILOVER_FILES = Counter(
+    "filegrid_failover_files_total",
+    "Files written to a category's fallback storage instead of its primary (reason: storage_down | overload)",
+    ["category", "reason"],
+)
+
 # ---------------------------------------------------------------------------
 # Additional metrics (slice H) that feed the business-guarantee alerts
 # ---------------------------------------------------------------------------
@@ -182,6 +194,8 @@ def _start_alert_series_at_zero() -> None:
             REQUESTS.labels("meter_readings", storage, "ingest", outcome)
     for outcome in ("ok", "failed", "locked"):
         LOGINS.labels(outcome)
+    for category in CATEGORIES:
+        FAILOVER_ACTIVE.labels(category).set(0.0)
     for storage in STORAGES:
         CANARY.labels(storage, "failed")  # at 0, so the first failure is seen by increase()
     for category in CATEGORIES:
@@ -238,6 +252,16 @@ def repaired(category: str, storage: str | None, kind: str, outcome: str) -> Non
 
 def login(outcome: str) -> None:
     LOGINS.labels(outcome).inc()
+
+
+def failover(category: str, active: bool) -> None:
+    if category in CATEGORIES:
+        FAILOVER_ACTIVE.labels(category).set(1.0 if active else 0.0)
+
+
+def failover_file(category: str, reason: str) -> None:
+    if category in CATEGORIES:
+        FAILOVER_FILES.labels(category, reason).inc()
 
 
 def canary(storage: str, outcome: str, seconds: float | None = None) -> None:

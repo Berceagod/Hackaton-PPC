@@ -27,6 +27,8 @@ const JOB_HINT: Record<string, string> = {
   'compare-storages': '25 s de scrieri și citiri pe PostgreSQL, S3 și FTP deodată.',
   duplicates: 'Retrimite 100 de citiri deja stocate; toate trebuie respinse.',
   'day-vs-storm': 'Zi liniștită, apoi 10x contoare (≈15 s). Completează cele două bare din Secțiunea B.',
+  'overload-flood':
+    '240 de citiri exact în același moment: dacă storage-ul principal este depășit, surplusul merge pe cel de rezervă (setat în Politici).',
 }
 // where the effect of each button can be watched
 const JOB_WHERE: Record<string, string> = {
@@ -35,6 +37,7 @@ const JOB_WHERE: Record<string, string> = {
   'compare-storages': 'Vezi: Analytics → „Latență live pe storage” (sus) și rezultatul de mai jos.',
   duplicates: 'Vezi: rezultatul de mai jos și contorul „duplicate” din Grafana.',
   'day-vs-storm': 'Vezi: Analytics → Secțiunea B (reîncărcați pagina).',
+  'overload-flood': 'Vezi: clopoțelul „Alerte” (failover) și rezultatul de mai jos, cu câte citiri au mers pe fiecare storage.',
 }
 
 interface Props {

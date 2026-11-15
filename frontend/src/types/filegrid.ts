@@ -59,6 +59,8 @@ export interface CategoryPolicy {
   encryption: boolean
   deduplicate: boolean
   priority: QueuePriority
+  /** where new files go automatically if the primary storage fails or is overloaded */
+  fallback_storage?: StorageBackend | null
 }
 
 export type PoliciesMap = Record<FileCategory, CategoryPolicy>

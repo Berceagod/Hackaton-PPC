@@ -39,6 +39,7 @@ JOBS = {
     "compare-storages": "Comparație storage-uri",
     "duplicates": "Citiri duplicate",
     "day-vs-storm": "Zi normală vs. furtună (Secțiunea B)",
+    "overload-flood": "Flux prea mare (failover automat)",
 }
 
 
@@ -89,7 +90,8 @@ def synthetic_file(category: str, n: int) -> tuple[str, bytes, dict]:
 
 
 def _post_file(base: str, token: str, category: str, name: str, data: bytes, meta: dict,
-               extra_headers: dict | None = None, ctype: str = "application/octet-stream") -> int:
+               extra_headers: dict | None = None, ctype: str = "application/octet-stream",
+               want_body: bool = False):
     """Multipart POST to our own /ingest (stdlib only). Returns the HTTP status."""
     boundary = uuid.uuid4().hex
     parts = []
@@ -104,11 +106,16 @@ def _post_file(base: str, token: str, category: str, name: str, data: bytes, met
                  "Authorization": f"Bearer {token}", **(extra_headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
+            if want_body:
+                try:
+                    return resp.status, json.loads(resp.read().decode() or "{}")
+                except ValueError:
+                    return resp.status, {}
             return resp.status
     except urllib.error.HTTPError as exc:
-        return exc.code
+        return (exc.code, {}) if want_body else exc.code
     except Exception:
-        return 0
+        return (0, {}) if want_body else 0
 
 
 def _token(deps) -> str:
@@ -241,7 +248,7 @@ async def _compare_storages(deps, seconds: float = 25.0) -> dict:
     return {"summary": "; ".join(parts), "storages": stats}
 
 
-async def _send_reading(deps, i: int) -> int:
+async def _send_reading(deps, i: int, want_body: bool = False):
     """A synthetic meter reading through the real ingest path, with the service token."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + f".{i % 1000:03d}Z"
     meter = f"MTR-TST-{uuid.uuid4().hex[:8]}"
@@ -250,7 +257,44 @@ async def _send_reading(deps, i: int) -> int:
     return await asyncio.to_thread(
         _post_file, deps.settings.testing_self_url, deps.settings.simulator_token, "meter_readings",
         "reading.json", json.dumps(doc).encode(), {}, {"Idempotency-Key": f"{meter}:{ts}"},
-        "application/json")
+        "application/json", want_body)
+
+
+async def _overload_flood(deps, count: int = 240) -> dict:
+    """The data flux is too big: `count` readings at the very same moment. Each backend worker has
+    its own concurrency limit, so this must exceed FAILOVER_LOAD_THRESHOLD on every worker. With a
+    fallback storage set for meter_readings (Politici), the surplus is redirected to it."""
+    policy = (await deps.policies.all())["meter_readings"]
+    # the default thread pool has ~32 threads, which would spread the burst out: use one thread
+    # per request so they really arrive at the same moment
+    from concurrent.futures import ThreadPoolExecutor
+    loop = asyncio.get_running_loop()
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    requests = []
+    for i in range(count):
+        meter = f"MTR-TST-{uuid.uuid4().hex[:8]}"
+        stamp = f"{ts}.{i % 1000:03d}Z"
+        doc = {"meter_id": meter, "timestamp": stamp, "zone": random.choice(REGIONS),
+               "instant": {"voltage_v": 229.7}, "events": [], "sim_label": None}
+        requests.append((json.dumps(doc).encode(), {"Idempotency-Key": f"{meter}:{stamp}"}))
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        results = await asyncio.gather(*[
+            loop.run_in_executor(pool, _post_file, deps.settings.testing_self_url,
+                                 deps.settings.simulator_token, "meter_readings", "reading.json",
+                                 raw, {}, headers, "application/json", True)
+            for raw, headers in requests])
+    where: dict[str, int] = {}
+    refused = 0
+    for status, body in results:
+        if status == 202:
+            where[body.get("storage", "?")] = where.get(body.get("storage", "?"), 0) + 1
+        else:
+            refused += 1
+    parts = ", ".join(f"{n} pe {s}" for s, n in sorted(where.items()))
+    note = ("" if policy.get("fallback_storage") else
+            " Nu este setat un storage de rezervă pentru citiri: setați-l în Politici ca să vedeți redirecționarea.")
+    return {"summary": f"{count} citiri deodată: {parts or 'niciuna acceptată'}, {refused} refuzate. "
+                       f"Principal: {policy['storage']}, rezervă: {policy.get('fallback_storage') or 'fără'}.{note}"}
 
 
 async def _scenario(deps, meters: int, concurrency: int) -> dict:
@@ -319,6 +363,7 @@ RUNNERS = {
     "compare-storages": _compare_storages,
     "duplicates": _duplicates,
     "day-vs-storm": _day_vs_storm,
+    "overload-flood": _overload_flood,
 }
 
 

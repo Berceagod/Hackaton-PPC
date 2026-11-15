@@ -236,3 +236,61 @@ groups:
         annotations:
           runbook: "docs/runbooks/platform.md#nobackendinstances"
           summary: "No backend instance is reachable by Prometheus"
+
+  # Capacity, failover and security (alert bell in the app): data volume too high, a storage
+  # slow, failover active, errors in the non-meter categories, repeated failed logins.
+  - name: capacity-and-failover
+    rules:
+      - alert: HighDataFlux
+        expr: |
+          sum by (category) (rate(filegrid_bytes_total{operation=~"ingest|chunk"}[1m])) > 5e6
+        for: 30s
+        labels: { severity: warning, guarantee: "capacity: the data flux stays within what the primary storage can absorb" }
+        annotations:
+          runbook: "docs/runbooks/platform.md#highdataflux"
+          summary: "{{ $labels.category }} is receiving {{ $value | humanize1024 }}B/s of data"
+          description: "A lot of data is arriving at once. If the category has a fallback storage, new files are routed there automatically once the primary is overloaded."
+      - alert: HighFileRate
+        expr: |
+          sum by (category) (rate(filegrid_requests_total{operation="ingest",outcome=~"ok|queued"}[1m])) > 50
+        for: 30s
+        labels: { severity: warning, guarantee: "capacity: the file rate stays within what the primary storage can absorb" }
+        annotations:
+          runbook: "docs/runbooks/platform.md#highfilerate"
+          summary: "{{ $labels.category }} is receiving {{ $value | printf \"%.0f\" }} files per second (more than 5x a normal day)"
+          description: "A spike, a storm or a runaway sender. The category has its own limit, so the others are not affected."
+      - alert: FailoverActive
+        expr: max by (category) (filegrid_failover_active) == 1
+        for: 10s
+        labels: { severity: warning, guarantee: "resilience: new files keep being stored when the primary storage cannot take them" }
+        annotations:
+          runbook: "docs/runbooks/platform.md#failoveractive"
+          summary: "{{ $labels.category }}: new files are going to the fallback storage"
+          description: "The primary storage is down or overloaded. Nothing is lost; the category returns to its primary by itself when it recovers."
+      - alert: StorageSlow
+        expr: |
+          histogram_quantile(0.95, sum by (le, storage) (rate(filegrid_storage_operation_duration_seconds_bucket{op="put",outcome="ok"}[2m]))) > 1
+        for: 1m
+        labels: { severity: warning, guarantee: "performance: writes to a storage stay fast" }
+        annotations:
+          runbook: "docs/runbooks/platform.md#storageslow"
+          summary: "Writes to {{ $labels.storage }} take {{ $value | printf \"%.1f\" }} s at p95"
+          description: "The storage is slow, which slows every category that uses it. Compare it with the others on the Analytics live chart."
+      - alert: CategoryErrorRateHigh
+        expr: |
+          sum by (category) (rate(filegrid_requests_total{category!="meter_readings",outcome="server_error",operation!="drain"}[2m]))
+            / sum by (category) (rate(filegrid_requests_total{category!="meter_readings",operation!="drain"}[2m])) > 0.05
+        for: 1m
+        labels: { severity: critical, guarantee: "availability: uploads of every category succeed" }
+        annotations:
+          runbook: "docs/runbooks/platform.md#categoryerrorratehigh"
+          summary: "More than 5% of {{ $labels.category }} requests fail with a server error"
+          description: "Uploads or downloads of this category are failing. Check its storage and the backend logs."
+      - alert: LoginFailuresHigh
+        expr: sum(increase(filegrid_logins_total{outcome=~"failed|locked"}[5m])) > 20
+        for: 0s
+        labels: { severity: warning, guarantee: "security: accounts are not being guessed" }
+        annotations:
+          runbook: "docs/runbooks/platform.md#loginfailureshigh"
+          summary: "{{ $value | printf \"%.0f\" }} failed or blocked logins in the last 5 minutes"
+          description: "Someone may be guessing passwords. Accounts are locked with backoff automatically; check the audit trail for the locked accounts."

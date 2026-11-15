@@ -56,6 +56,7 @@ class FakeRepo:
         self.faults: dict[str, dict] = {}   # chaos faults
         self.file_keys: dict[str, dict] = {}  # per-file wrapped keys
         self.testing: dict[str, tuple] = {}   # testing overlay state
+        self.app_alerts: dict[str, dict] = {}  # alerts raised by the app
         self.leases: dict[str, tuple] = {}
         self.logins: dict[str, dict] = {}     # failed-login counters
         self.replicas: dict[str, dict] = {}  # file_id -> {storage, storage_key, status}
@@ -182,6 +183,21 @@ class FakeRepo:
             st.update(verified_at=None, status=None)
         else:
             st.update(verified_at=time.time(), status=status)
+
+    # ---- application alerts (mirror PostgresRepo) ----
+    async def raise_alert(self, key, severity, title, detail, category):
+        cur = self.app_alerts.get(key)
+        since = cur["raised_at"] if cur and not cur["resolved_at"] else datetime.now(timezone.utc).isoformat()
+        self.app_alerts[key] = {"key": key, "severity": severity, "title": title, "detail": detail,
+                                "category": category, "raised_at": since, "resolved_at": None}
+
+    async def resolve_alert(self, key):
+        cur = self.app_alerts.get(key)
+        if cur and not cur["resolved_at"]:
+            cur["resolved_at"] = datetime.now(timezone.utc).isoformat()
+
+    async def list_alerts(self, limit):
+        return sorted(self.app_alerts.values(), key=lambda a: (a["resolved_at"] is not None, a["raised_at"]))[:limit]
 
     # ---- testing overlay state (mirrors PostgresRepo) ----
     async def set_testing(self, key, value, duration):

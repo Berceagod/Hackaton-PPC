@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Save, RefreshCw, Zap, CheckCircle2, Lock } from 'lucide-react'
-import { getPolicies, getStoredSession, updatePolicies } from '../services/api'
+import { getAlerts, getPolicies, getStoredSession, updatePolicies } from '../services/api'
 import type {
   FileCategory,
   PoliciesMap,
@@ -26,6 +26,8 @@ export function PoliciesPage({ pushToast }: PoliciesPageProps) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [applied, setApplied] = useState(false)
+  // categories whose new files are going to the fallback storage right now (from the alert feed)
+  const [failovers, setFailovers] = useState<Record<string, string>>({})
   // Only an admin may change routing (the backend answers 403 otherwise)
   const canEdit = getStoredSession()?.user.role === 'admin'
 
@@ -45,6 +47,31 @@ export function PoliciesPage({ pushToast }: PoliciesPageProps) {
       }
     })()
   }, [pushToast])
+
+  useEffect(() => {
+    let alive = true
+    async function poll() {
+      try {
+        const feed = await getAlerts()
+        if (!alive) return
+        const active: Record<string, string> = {}
+        for (const a of feed.alerts) {
+          if (a.source === 'app' && a.state === 'firing' && a.category && a.id.startsWith('app:failover:')) {
+            active[a.category] = a.title
+          }
+        }
+        setFailovers(active)
+      } catch {
+        // the page works without the live badge
+      }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 5000)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [])
 
   function updateCategory<K extends keyof PoliciesMap[FileCategory]>(
     category: FileCategory,
@@ -144,6 +171,11 @@ export function PoliciesPage({ pushToast }: PoliciesPageProps) {
                 {CATEGORY_LABELS[cat]}
               </h3>
               <p className="mb-4 font-mono text-[11px] text-grid-muted">{cat}</p>
+              {failovers[cat] && (
+                <p className="mb-3 rounded-lg border border-grid-amber/40 bg-grid-amber/10 px-3 py-2 text-[12px] font-medium text-grid-amber">
+                  {failovers[cat]}
+                </p>
+              )}
 
               <div className="space-y-3">
                 <div>
@@ -193,6 +225,37 @@ export function PoliciesPage({ pushToast }: PoliciesPageProps) {
                     <option value="normal">normal</option>
                     <option value="low">low</option>
                   </select>
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-[11px] uppercase tracking-wider text-grid-muted">
+                    Storage de rezervă (redirecționare automată)
+                  </label>
+                  <select
+                    disabled={!canEdit}
+                    value={p.fallback_storage ?? ''}
+                    onChange={(e) =>
+                      updateCategory(
+                        cat,
+                        'fallback_storage',
+                        e.target.value === '' ? null : (e.target.value as StorageBackend),
+                      )
+                    }
+                    className="w-full rounded-lg border border-grid-border bg-grid-bg px-3 py-2 text-sm text-grid-text outline-none focus:ring-2 focus:ring-grid-blue disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <option value="">— fără (nu comută automat) —</option>
+                    {(['postgres', 's3', 'ftp'] as StorageBackend[])
+                      .filter((st) => st !== p.storage)
+                      .map((st) => (
+                        <option key={st} value={st}>
+                          {st}
+                        </option>
+                      ))}
+                  </select>
+                  <p className="mt-1 text-[11px] text-grid-muted">
+                    Dacă storage-ul principal pică sau fluxul de date este prea mare, fișierele noi merg
+                    automat aici și revin singure la principal când își revine.
+                  </p>
                 </div>
               </div>
             </div>

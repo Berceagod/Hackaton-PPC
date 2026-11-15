@@ -32,6 +32,9 @@ class CategoryPolicy:
     # document: the UI does not send it, and an update without it keeps the current value.
     replicas: int = 0
     replica_storage: str | None = None  # None = pick the first other storage automatically
+    # automatic failover (improvements): where NEW files go while the primary storage is down
+    # or its category is overloaded. None = no failover. Never a storage equal to the primary.
+    fallback_storage: str | None = None
 
     def to_dict(self) -> dict:
         data = {
@@ -45,6 +48,8 @@ class CategoryPolicy:
             data["replicas"] = self.replicas
         if self.replicas and self.replica_storage:
             data["replica_storage"] = self.replica_storage
+        if self.fallback_storage:
+            data["fallback_storage"] = self.fallback_storage
         return data
 
 
@@ -72,8 +77,14 @@ def parse_category(name: str, cfg) -> CategoryPolicy:
             raise PolicyError(f"{name}: the replica must be on a different storage than the primary")
     if name == "meter_readings" and replicas:
         raise PolicyError("meter_readings cannot have replicas (exactly-once ingest, tiny files)")
+    fallback = cfg.get("fallback_storage")
+    if fallback is not None:
+        if fallback not in STORAGES:
+            raise PolicyError(f"{name}: fallback_storage must be one of {STORAGES}")
+        if fallback == cfg["storage"]:
+            raise PolicyError(f"{name}: the fallback must be a different storage than the primary")
     return CategoryPolicy(cfg["storage"], cfg["encryption"], cfg["deduplicate"], cfg["priority"],
-                          replicas, replica_storage)
+                          replicas, replica_storage, fallback)
 
 
 def parse_policy_document(doc) -> dict[str, CategoryPolicy]:
@@ -152,6 +163,9 @@ class PolicyStore:
             if old is not None and "replicas" not in cfg:
                 keep = old.replica_storage if old.replica_storage != changes[name].storage else None
                 changes[name] = replace(changes[name], replicas=old.replicas, replica_storage=keep)
+            if old is not None and "fallback_storage" not in cfg:  # not mentioned: keep it
+                keep = old.fallback_storage if old.fallback_storage != changes[name].storage else None
+                changes[name] = replace(changes[name], fallback_storage=keep)
         merged = {**self._policies, **changes}
         if self._persistence is not None:
             await self._persistence.save_policies(
