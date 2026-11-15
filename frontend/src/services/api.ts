@@ -1005,6 +1005,99 @@ export async function clearChaos(): Promise<void> {
   await chaosCall('', 'DELETE')
 }
 
+// ─── Testing overlay (admin only, off unless TESTING_ENABLED=true) + live storage latency ───
+
+export interface TestingStatus {
+  enabled: boolean
+  quiet?: { on: boolean; remaining_seconds: number }
+  generator?: { on: boolean; categories: string[]; rate: number; remaining_seconds: number }
+  simulator?: {
+    mode: string
+    target_rate: number
+    paused: boolean
+    meters: number
+    backlog: number
+    counts: Record<string, number>
+  } | null
+  job?: {
+    name: string
+    running: boolean
+    summary?: string
+    error?: string
+    started?: number
+    finished?: number
+  } | null
+  jobs?: Record<string, string>
+  limits?: { max_rate: number; max_duration: number }
+}
+
+export interface StorageLive {
+  put_p50_ms?: number
+  put_p95_ms?: number
+  get_p50_ms?: number
+  get_p95_ms?: number
+  ops_per_s?: number
+}
+
+export interface LiveLatency {
+  available: boolean
+  storages: Record<string, StorageLive>
+  at: number
+}
+
+async function testingCall(path: string, method: string, body?: unknown): Promise<unknown> {
+  const res = await apiFetch(path, {
+    method,
+    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!res.ok) {
+    let detail = ''
+    try {
+      detail = ((await res.json()) as { detail?: string }).detail ?? ''
+    } catch {
+      // not JSON
+    }
+    throw new Error(detail || `Cerere eșuată: ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function getTestingStatus(): Promise<TestingStatus> {
+  if (USE_MOCK) return { enabled: false }
+  return (await testingCall('/admin/testing', 'GET')) as TestingStatus
+}
+
+export async function setGenerator(
+  on: boolean,
+  categories: string[],
+  rate: number,
+  durationSeconds: number,
+): Promise<void> {
+  await testingCall(
+    '/admin/testing/generator',
+    'PUT',
+    on ? { on, categories, rate, duration_seconds: durationSeconds } : { on },
+  )
+}
+
+export async function setQuiet(on: boolean, durationSeconds = 1800): Promise<void> {
+  await testingCall('/admin/testing/quiet', 'PUT', on ? { on, duration_seconds: durationSeconds } : { on })
+}
+
+export async function simulatorAction(action: 'storm' | 'normal' | 'pause' | 'resume'): Promise<void> {
+  await testingCall('/admin/testing/simulator', 'POST', { action })
+}
+
+export async function startTestJob(name: string): Promise<void> {
+  await testingCall(`/admin/testing/jobs/${name}`, 'POST')
+}
+
+export async function getLiveLatency(): Promise<LiveLatency> {
+  if (USE_MOCK) return { available: false, storages: {}, at: Date.now() / 1000 }
+  return (await testingCall('/analytics/live', 'GET')) as LiveLatency
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`

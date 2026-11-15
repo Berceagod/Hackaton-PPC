@@ -23,6 +23,7 @@ from fastapi import HTTPException
 import metrics
 import replication
 from audit_chain import GENESIS
+from testing import is_quiet
 from logging_setup import trace_id_var
 
 log = logging.getLogger("filegrid.scrubber")
@@ -123,10 +124,11 @@ async def run_scrubber(deps, stop: asyncio.Event) -> None:
     anchor_every = max(int(3600 / max(s.scrub_interval_seconds, 1)), 1)  # about hourly
     while not stop.is_set():
         try:
-            await scrub_once(deps)
-            ticks += 1
-            if ticks % anchor_every == 1:
-                await anchor_audit_head(deps)
+            if not await is_quiet(deps):  # paused by the Testing overlay's "Liniște" switch
+                await scrub_once(deps)
+                ticks += 1
+                if ticks % anchor_every == 1:
+                    await anchor_audit_head(deps)
         except Exception:
             log.exception("scrubber pass failed")
         try:

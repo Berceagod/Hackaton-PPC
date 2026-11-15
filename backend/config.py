@@ -83,6 +83,10 @@ class Settings:
     scrub_recheck_seconds: float = 3600.0    # a file is re-checked at most this often
     scrub_max_bytes: int = 64 * 1024 * 1024  # bigger files are skipped by the background job
     scrub_categories: tuple = ("outage_records", "connection_docs", "drone_videos")
+    # testing overlay (admin only, off unless enabled): synthetic traffic and one-press demo runs
+    testing_enabled: bool = False
+    testing_self_url: str = "http://127.0.0.1:8000"
+    simulator_url: str = "http://simulator:8080"
     # login lockout with backoff (improvements.md 2.5): after N consecutive failures an account
     # is refused for base * 2^(failures-N) seconds, at most `max`
     login_max_failures: int = 5
@@ -144,6 +148,9 @@ class Settings:
             scrub_batch=int(os.environ.get("SCRUB_BATCH", "5")),
             scrub_recheck_seconds=float(os.environ.get("SCRUB_RECHECK_SECONDS", "3600")),
             scrub_max_bytes=int(os.environ.get("SCRUB_MAX_BYTES", str(64 * 1024 * 1024))),
+            testing_enabled=os.environ.get("TESTING_ENABLED", "false").strip().lower() in ("1", "true", "yes"),
+            testing_self_url=os.environ.get("TESTING_SELF_URL", "http://127.0.0.1:8000"),
+            simulator_url=os.environ.get("SIMULATOR_URL", "http://simulator:8080"),
             login_max_failures=int(os.environ.get("LOGIN_MAX_FAILURES", "5")),
             login_lock_base_seconds=float(os.environ.get("LOGIN_LOCK_BASE_SECONDS", "30")),
             login_lock_max_seconds=float(os.environ.get("LOGIN_LOCK_MAX_SECONDS", "900")),
