@@ -42,6 +42,8 @@ $envLines = Get-Content -LiteralPath .env | Where-Object { $_ -ne "DISPECER_PASS
 Set-Content -LiteralPath .env -Value $envLines -Encoding ascii
 Ensure DISPECER_PASSWORD ((Rand).Substring(0, 16))
 Ensure ADMIN_PASSWORD ((Rand).Substring(0, 16))
+# Read-only auditor account: audit trails and the file list, never file content
+Ensure AUDITOR_PASSWORD ((Rand).Substring(0, 16))
 
 # ---- slice H (observability) secrets: Ensure KEY (Rand) (also in start.sh): add directly below this line ----
 # Login for Grafana (https://localhost/grafana/, user "admin"); read it from .env.
@@ -104,7 +106,11 @@ for ($i = 0; $i -lt 90; $i++) {
         Write-Host "FileGrid is up:  https://localhost   (self-signed certificate)"
         Write-Host "Login:           dispecer@ppc.ro / $pwD"
         Write-Host "                 admin@ppc.ro    / $pwA"
+        $pwU = ((Select-String -Path .env -Pattern '^AUDITOR_PASSWORD=').Line -split '=', 2)[1]
+        Write-Host "                 auditor@ppc.ro  / $pwU   (audit trails only, no downloads)"
         Write-Host "                 (generated for this machine, stored only in .env)"
+        $pwG = ((Select-String -Path .env -Pattern '^GRAFANA_ADMIN_PASSWORD=').Line -split '=', 2)[1]
+        Write-Host "Dashboards:      https://localhost/grafana/   admin / $pwG"
         $deps = cmd /c "docker compose exec -T backend python -c ""import urllib.request as u; print(u.urlopen('http://127.0.0.1:8000/health', timeout=10).read().decode())"" 2>NUL"
         if ($deps -match '"status"\s*:\s*"degraded"') {
             Write-Host "Note: a storage is still starting or down: $deps"

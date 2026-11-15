@@ -7,7 +7,7 @@ replica re-reads it at most `ttl` seconds later, so no restart or redeploy is ne
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import yaml
 
@@ -28,14 +28,24 @@ class CategoryPolicy:
     encryption: bool
     deduplicate: bool
     priority: str
+    # one extra copy on a DIFFERENT storage (improvements.md 2.2); 0 = none. Optional in the
+    # document: the UI does not send it, and an update without it keeps the current value.
+    replicas: int = 0
+    replica_storage: str | None = None  # None = pick the first other storage automatically
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "storage": self.storage,
             "encryption": self.encryption,
             "deduplicate": self.deduplicate,
             "priority": self.priority,
         }
+        # extras appear only when switched on: the documented policy shape stays four fields
+        if self.replicas:
+            data["replicas"] = self.replicas
+        if self.replicas and self.replica_storage:
+            data["replica_storage"] = self.replica_storage
+        return data
 
 
 def parse_category(name: str, cfg) -> CategoryPolicy:
@@ -51,7 +61,19 @@ def parse_category(name: str, cfg) -> CategoryPolicy:
     for flag in ("encryption", "deduplicate"):
         if not isinstance(cfg[flag], bool):
             raise PolicyError(f"{name}: {flag} must be true or false")
-    return CategoryPolicy(cfg["storage"], cfg["encryption"], cfg["deduplicate"], cfg["priority"])
+    replicas = cfg.get("replicas", 0)
+    if isinstance(replicas, bool) or replicas not in (0, 1):
+        raise PolicyError(f"{name}: replicas must be 0 or 1")
+    replica_storage = cfg.get("replica_storage")
+    if replica_storage is not None:
+        if replica_storage not in STORAGES:
+            raise PolicyError(f"{name}: replica_storage must be one of {STORAGES}")
+        if replica_storage == cfg["storage"]:
+            raise PolicyError(f"{name}: the replica must be on a different storage than the primary")
+    if name == "meter_readings" and replicas:
+        raise PolicyError("meter_readings cannot have replicas (exactly-once ingest, tiny files)")
+    return CategoryPolicy(cfg["storage"], cfg["encryption"], cfg["deduplicate"], cfg["priority"],
+                          replicas, replica_storage)
 
 
 def parse_policy_document(doc) -> dict[str, CategoryPolicy]:
@@ -124,6 +146,12 @@ class PolicyStore:
 
     async def update(self, doc) -> dict[str, dict]:
         changes = parse_policy_document(doc)
+        raw = doc["categories"] if isinstance(doc.get("categories"), dict) else doc
+        for name, cfg in raw.items():  # an update that does not mention replicas keeps them
+            old = self._policies.get(name)
+            if old is not None and "replicas" not in cfg:
+                keep = old.replica_storage if old.replica_storage != changes[name].storage else None
+                changes[name] = replace(changes[name], replicas=old.replicas, replica_storage=keep)
         merged = {**self._policies, **changes}
         if self._persistence is not None:
             await self._persistence.save_policies(

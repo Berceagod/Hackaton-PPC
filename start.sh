@@ -36,6 +36,8 @@ ensure FILEGRID_MASTER_KEY "$(rand)"
 sed -i -e '/^DISPECER_PASSWORD=dispecer$/d' -e '/^ADMIN_PASSWORD=admin$/d' .env
 ensure DISPECER_PASSWORD "$(rand | head -c 16)"
 ensure ADMIN_PASSWORD "$(rand | head -c 16)"
+# Read-only auditor account: audit trails and the file list, never file content
+ensure AUDITOR_PASSWORD "$(rand | head -c 16)"
 
 # ---- slice H (observability) secrets: ensure KEY "$(rand)" (also in start.ps1): add directly below this line ----
 # Login for Grafana (https://localhost/grafana/, user "admin"); read it from .env.
@@ -59,7 +61,9 @@ for _ in $(seq 1 90); do
     echo "FileGrid is up:  https://localhost   (self-signed certificate)"
     echo "Login:           dispecer@ppc.ro / $(pw DISPECER_PASSWORD)"
     echo "                 admin@ppc.ro    / $(pw ADMIN_PASSWORD)"
+    echo "                 auditor@ppc.ro  / $(pw AUDITOR_PASSWORD)   (audit trails only, no downloads)"
     echo "                 (generated for this machine, stored only in .env)"
+    echo "Dashboards:      https://localhost/grafana/   admin / $(pw GRAFANA_ADMIN_PASSWORD)"
     deps="$(docker compose exec -T backend python -c "import urllib.request as u; print(u.urlopen('http://127.0.0.1:8000/health', timeout=10).read().decode())" 2>/dev/null || true)"
     echo "$deps" | grep -q '"status":"degraded"' && echo "Note: a storage is still starting or down: $deps"
     exit 0

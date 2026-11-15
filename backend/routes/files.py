@@ -24,6 +24,9 @@ from integrity import HashingStream, sha256_of_stream, upload_chunks
 import metrics
 from logging_setup import trace_id_var
 from meter_ingest import ingest_meter_reading
+import keystore
+import replication
+from keystore import FileErased
 from policies import CATEGORIES, STORAGES
 from repo import FileRecord
 from storage.base import ObjectNotFound, StorageError
@@ -33,6 +36,8 @@ router = APIRouter()
 
 INGEST_ROLES = require_roles("dispecer", "admin", "service")
 USERS = require_roles("dispecer", "admin")  # people; the simulator token cannot read
+# An auditor sees WHO did WHAT (file list, audit trails) but can never read a file's content
+READERS = require_roles("dispecer", "admin", "auditor")
 
 # The UI knows two audit actions. Every finer-grained event maps onto one of them
 # (the exact event is still returned in `event`).
@@ -119,10 +124,12 @@ async def _ingest(request, file, category, metadata, idempotency_key, principal)
     # when the policy says so). Nothing is acknowledged until the storage confirmed the
     # durable write.
     stream = HashingStream(upload_chunks(file))
-    body = (
-        encrypt_stream(stream, deps.settings.master_key, file_id)
-        if policy.encryption else stream
-    )
+    if policy.encryption:
+        # a random key per file, stored only wrapped by the master key: the file can later be
+        # made unreadable for good by destroying that key (POST /files/{id}/erase)
+        body = encrypt_stream(stream, await keystore.new_file_key(deps, file_id), file_id)
+    else:
+        body = stream
     try:
         await storage.put_stream(key, body)
         size = stream.size  # plaintext size, what the user uploaded and will download
@@ -176,6 +183,12 @@ async def _ingest(request, file, category, metadata, idempotency_key, principal)
         await _cleanup(storage, key)
         raise
 
+    if policy.replicas:  # second copy on another storage; never fails the (already stored) upload
+        try:
+            await replication.replicate(deps, record, policy, principal.email)
+        except Exception:
+            log.exception("replication step failed", extra={"file_id": file_id})
+
     log.info(
         "file stored",
         extra={"category": category, "storage": storage.name, "file_id": file_id},
@@ -206,7 +219,7 @@ async def list_files(
     q: str | None = Query(None, max_length=200),
     limit: int = Query(500, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    _: Principal = Depends(USERS),
+    _: Principal = Depends(READERS),
 ) -> list[dict]:
     """Newest first. With no `category` and no `q`, machine-generated meter_readings are
     left out (they arrive continuously and would bury the manually uploaded files);
@@ -230,12 +243,11 @@ async def _load_or_404(deps, file_id: str) -> FileRecord:
     return rec
 
 
-def plaintext_stream(deps, rec: FileRecord):
-    """The file's original bytes: decrypted on the fly when it is stored encrypted."""
-    source = deps.storages[rec.storage].get_stream(rec.storage_key)
-    if rec.encrypted:
-        return decrypt_stream(source, deps.settings.master_key, rec.id)
-    return source
+async def plaintext_stream(deps, rec: FileRecord):
+    """The file's original bytes: decrypted on the fly when it is stored encrypted.
+    Raises FileErased once the file's key was destroyed."""
+    async for piece in replication.plaintext_of(deps, rec, rec.storage, rec.storage_key):
+        yield piece
 
 
 async def _verify(deps, rec: FileRecord) -> tuple[bool, str, str]:
@@ -246,6 +258,8 @@ async def _verify(deps, rec: FileRecord) -> tuple[bool, str, str]:
         raise HTTPException(503, f"Storage '{rec.storage}' not available")
     try:
         actual, _ = await sha256_of_stream(plaintext_stream(deps, rec))
+    except FileErased:
+        return False, "", "erased"
     except ObjectNotFound:
         return False, "", "object_missing"
     except DecryptionError:
@@ -264,6 +278,8 @@ async def verify(
     async with metrics.observe(rec.category, "verify") as obs:
         obs.note(storage=rec.storage)
         ok, actual, reason = await _verify(deps, rec)
+        if reason == "erased":
+            raise HTTPException(410, "File erased: its encryption key was destroyed")
         if ok:
             obs.add_bytes(rec.size_bytes)
         else:
@@ -299,7 +315,29 @@ async def download(
         obs.note(storage=rec.storage)
 
         # Verify BEFORE delivering any byte: a corrupt file is never served.
-        ok, actual, reason = await _verify(deps, rec)
+        unavailable = None
+        try:
+            ok, actual, reason = await _verify(deps, rec)
+        except HTTPException as exc:  # the primary's storage is down
+            ok, actual, reason, unavailable = False, "", "storage_unavailable", exc
+        if reason == "erased":
+            raise HTTPException(410, "File erased: its encryption key was destroyed")
+        extra_headers: dict[str, str] = {}
+        source_storage, source_key = rec.storage, rec.storage_key
+        if not ok:
+            # Self-healing (improvements.md 2.2): a verified second copy repairs the primary
+            # (or, if the primary cannot be written, is served as it is).
+            healed = await replication.heal(deps, rec, principal.email)
+            if healed == "repaired":
+                ok = True
+                extra_headers["X-Repaired"] = "true"
+            elif healed == "replica":
+                rep = await deps.repo.get_replica(rec.id)
+                ok = True
+                source_storage, source_key = rep["storage"], rep["storage_key"]
+                extra_headers["X-Served-From"] = source_storage
+        if not ok and unavailable is not None:
+            raise unavailable
         if not ok:
             log.error(
                 "integrity check failed",
@@ -331,25 +369,29 @@ async def download(
                 },
             )
 
-        await deps.repo.add_audit(
-            file_id, "download", principal.email, trace_id, "Integritate verificată (SHA-256)"
-        )
+        detail = "Integritate verificată (SHA-256)"
+        if "X-Repaired" in extra_headers:
+            detail += "; copia principală a fost reparată din copia secundară"
+        elif "X-Served-From" in extra_headers:
+            detail += f"; servit din copia secundară ({source_storage})"
+        await deps.repo.add_audit(file_id, "download", principal.email, trace_id, detail)
         obs.defer()  # a download ends when its last byte is sent, not when we return
         return StreamingResponse(
-            metrics.counted(obs, plaintext_stream(deps, rec)),
+            metrics.counted(obs, replication.plaintext_of(deps, rec, source_storage, source_key)),
             media_type="application/octet-stream",
             headers={
                 "X-Integrity-Verified": "true",
                 "X-File-Sha256": rec.sha256,
                 "Content-Length": str(rec.size_bytes),
                 "Content-Disposition": _content_disposition(rec.filename),
+                **extra_headers,
             },
         )
 
 
 @router.get("/files/{file_id}/audit")
 async def audit(
-    file_id: str, request: Request, _: Principal = Depends(USERS)
+    file_id: str, request: Request, _: Principal = Depends(READERS)
 ) -> list[dict]:
     """Who did what with this file, newest first. `action` is upload|download (what the
     UI renders); `event` is the exact event: upload, download, verify, download_blocked."""
@@ -360,3 +402,42 @@ async def audit(
         {**e, "event": e["action"], "action": _UI_ACTION.get(e["action"], "download")}
         for e in entries
     ]
+
+
+ERASABLE = "connection_docs"  # personal data: the category erasure exists for
+
+
+@router.post("/files/{file_id}/erase")
+async def erase(
+    file_id: str, request: Request, principal: Principal = Depends(require_roles("admin"))
+) -> dict:
+    """Right to erasure for a document (improvements.md 2.5). The file's encryption key is
+    destroyed, so its ciphertext becomes unreadable everywhere it still exists (replica,
+    storage snapshot, restored backup of the storage); the stored objects are deleted as
+    well. The metadata row and the audit trail stay: the fact that it existed, who read it
+    and who erased it must remain provable. Irreversible."""
+    deps = request.app.state.deps
+    rec = await _load_or_404(deps, file_id)
+    if rec.category != ERASABLE:
+        raise HTTPException(422, f"Only {ERASABLE} can be erased")
+    row = await deps.repo.get_file_key(file_id)
+    if row and row["status"] == "erased":
+        raise HTTPException(410, "File already erased")
+    destroyed = await keystore.destroy(deps, file_id, principal.email)
+    removed = []
+    copy = await deps.repo.get_replica(file_id)
+    targets = [(rec.storage, rec.storage_key)] + ([(copy["storage"], copy["storage_key"])] if copy else [])
+    for name, key in targets:
+        try:
+            await deps.storages[name].delete(key)
+            removed.append(name)
+        except StorageError:
+            log.warning("object not deleted during erasure", extra={"file_id": file_id, "storage": name})
+    method = "key_destroyed" if destroyed else "objects_deleted_only"
+    await deps.repo.add_audit(
+        file_id, "erased", principal.email, trace_id_var.get(),
+        "Document șters definitiv: cheia de criptare a fost distrusă"
+        if destroyed else
+        "Document șters: obiectele au fost șterse (fișier mai vechi, fără cheie proprie)")
+    log.warning("file erased", extra={"file_id": file_id, "user": principal.email, "method": method})
+    return {"file_id": file_id, "erased": True, "method": method, "objects_deleted_from": removed}

@@ -24,8 +24,87 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, guarantee: "integrity: a corrupt file is never served", category: outage_records, storage: s3, reason: checksum_mismatch }
             exp_annotations:
+              runbook: "docs/runbooks/integrity.md#fileintegrityfailure"
               summary: "A outage_records file failed its integrity check on s3 (checksum_mismatch)"
               description: "The download was blocked (HTTP 409) and nothing corrupt was served. The stored data is damaged or missing: investigate the storage."
+
+  # ---- self-healing: a repaired file is information (info), a failed repair pages (critical)
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_repairs_total{category="outage_records",storage="s3",kind="primary",outcome="ok"}'
+        values: '0 0 0 0 1 1 1 1 1 1'
+      - series: 'filegrid_repairs_total{category="outage_records",storage="s3",kind="primary",outcome="failed"}'
+        values: '0 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 90s
+        alertname: FileRepaired
+        exp_alerts:
+          - exp_labels: { severity: info, guarantee: "integrity: damage is repaired from a second copy", category: outage_records, storage: s3, kind: primary }
+            exp_annotations:
+              runbook: "docs/runbooks/integrity.md#filerepaired"
+              summary: "A outage_records primary copy on s3 was damaged and repaired from its other copy"
+              description: "Nothing was lost and no damaged byte was served. The storage that held the damaged copy deserves a look (disk, bit rot, someone writing to it directly)."
+      - eval_time: 90s
+        alertname: RepairFailed
+        exp_alerts: []
+
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_repairs_total{category="connection_docs",storage="ftp",kind="replica",outcome="failed"}'
+        values: '0 0 0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 90s
+        alertname: RepairFailed
+        exp_alerts:
+          - exp_labels: { severity: critical, guarantee: "integrity: damage is repaired from a second copy", category: connection_docs, storage: ftp, kind: replica }
+            exp_annotations:
+              runbook: "docs/runbooks/integrity.md#repairfailed"
+              summary: "Repairing a connection_docs replica copy on ftp failed"
+              description: "A damaged copy could not be rewritten from its good copy (storage down or read-only). Until it is fixed the file has no redundancy."
+
+  # ---- canary: a storage that fails its synthetic round trip repeatedly is reported; one blip is not
+  - interval: 15s
+    input_series:
+      - series: 'filegrid_canary_runs_total{storage="ftp",outcome="failed"}'
+        values: '0 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16'
+      - series: 'filegrid_canary_runs_total{storage="s3",outcome="failed"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: StorageCanaryFailing
+        exp_alerts:
+          - exp_labels: { severity: warning, guarantee: "resilience: a broken storage is found without waiting for a user", storage: ftp }
+            exp_annotations:
+              runbook: "docs/runbooks/platform.md#storagecanaryfailing"
+              summary: "The synthetic check on the ftp storage keeps failing"
+              description: "A tiny object could not be written, read back identically and deleted on this storage. Real uploads to it will fail too."
+
+  # ---- SLO: 99.5 % of outage records within 2.5 s; fires at a 10x budget burn, quiet when healthy
+  - interval: 1m
+    input_series:
+      - series: 'filegrid_request_duration_seconds_count{category="outage_records",operation="ingest"}'
+        values: '0+60x20'
+      - series: 'filegrid_request_duration_seconds_bucket{category="outage_records",operation="ingest",le="2.5"}'
+        values: '0+50x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: OutageIngestSLOBurn
+        exp_alerts:
+          - exp_labels: { severity: warning, guarantee: "outage records: 99.5 % saved within 2.5 s (SLO)" }
+            exp_annotations:
+              runbook: "docs/runbooks/outage-records.md#outageingestsloburn"
+              summary: "More than 5 % of outage records took over 2.5 s to save in the last 10 minutes (the SLO allows 0.5 %)"
+              description: "The error budget is burning ten times faster than allowed. Check the slow storage and the bulkhead panel."
+  - interval: 1m
+    input_series:
+      - series: 'filegrid_request_duration_seconds_count{category="outage_records",operation="ingest"}'
+        values: '0+60x20'
+      - series: 'filegrid_request_duration_seconds_bucket{category="outage_records",operation="ingest",le="2.5"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: OutageIngestSLOBurn
+        exp_alerts: []
 
   # ... but corruption in transit (the client resends the chunk) is not paged
   - interval: 15s
@@ -51,6 +130,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, guarantee: "connection_docs: personal data protected" }
             exp_annotations:
+              runbook: "docs/runbooks/connection-docs.md#personaldatastoredunencrypted"
               summary: "2 connection document(s) are stored WITHOUT encryption"
               description: "Someone with direct access to the storage could read personal data. Check the connection_docs policy (encryption must be true) and re-protect or remove the files."
   - interval: 15s
@@ -76,6 +156,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, guarantee: "meter_readings: never lost" }
             exp_annotations:
+              runbook: "docs/runbooks/meter-readings.md#meteroutboxbacklog"
               summary: "5 accepted reading(s) are not yet in their storage"
               description: "They are safe in the metadata database and will be written out when the storage is back (outbox)."
       - eval_time: 2m
@@ -96,6 +177,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, guarantee: "meter_readings: never lost" }
             exp_annotations:
+              runbook: "docs/runbooks/meter-readings.md#meterreadingsnotarriving"
               summary: "No meter reading accepted for 2 minutes (a gap in the data)"
               description: "Readings were arriving, now none is accepted. Check the meters/simulator, the gateway and the backend."
   # no readings ever (a fresh system) is not a "gap"
@@ -121,6 +203,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, guarantee: "meter_readings: never lost" }
             exp_annotations:
+              runbook: "docs/runbooks/meter-readings.md#meterreadingservererrors"
               summary: "More than 5% of meter readings fail with a server error (10%)"
               description: "Meters will retry, but a sustained failure rate puts readings at risk."
   - interval: 15s
@@ -147,6 +230,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, guarantee: "meter_readings: never duplicated" }
             exp_annotations:
+              runbook: "docs/runbooks/meter-readings.md#meterduplicatereadingshigh"
               summary: "20% of incoming meter readings are duplicates"
               description: "They are all rejected (HTTP 409) and none is stored twice, but a sender is re-sending the same readings (retry storm, clock reset or replay)."
   - interval: 15s
@@ -171,6 +255,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, guarantee: "meter_readings: never lost" }
             exp_annotations:
+              runbook: "docs/runbooks/meter-readings.md#meterreadingslostatsender"
               summary: "Meters dropped 3 reading(s): their backlog is full"
               description: "FileGrid was unreachable for longer than a meter can buffer. Those readings are gone for good."
 
@@ -191,6 +276,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, guarantee: "outage_records: available immediately" }
             exp_annotations:
+              runbook: "docs/runbooks/outage-records.md#outagerecordingestslow"
               summary: "Saving an outage record takes 4.9 s at p95 (limit 2 s)"
               description: "A record is acknowledged only after it is stored, so this is how long dispatchers wait for it to exist."
   - interval: 15s
@@ -233,6 +319,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, guarantee: "drone_videos: transfer survives bad links" }
             exp_annotations:
+              runbook: "docs/runbooks/drone-videos.md#videouploadstalled"
               summary: "1 chunked upload(s) have stalled: no chunk received within the stall threshold (5 min by default)"
               description: "The upload is resumable: the field team's client should resume it, or it is purged after 24 h. Check the link quality."
 
@@ -249,6 +336,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, storage: ftp, guarantee: "resilience: one storage down must not stop the others" }
             exp_annotations:
+              runbook: "docs/runbooks/platform.md#storagecircuitopen"
               summary: "The ftp storage keeps failing: its circuit breaker is open"
               description: "Files for this storage fail fast; other categories are unaffected and meter readings wait in the outbox."
 
@@ -263,6 +351,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: warning, category: drone_videos, guarantee: "scalability: a spike in one category must not hurt the others" }
             exp_annotations:
+              runbook: "docs/runbooks/platform.md#categoryatcapacity"
               summary: "drone_videos requests are being refused: the category is at capacity"
               description: "Its own limit is full (HTTP 503). The other categories are unaffected. Add backend instances or raise its limit."
 
@@ -279,6 +368,7 @@ tests:
         exp_alerts:
           - exp_labels: { severity: critical, guarantee: "availability", job: backend, instance: "10.0.0.2:8000" }
             exp_annotations:
+              runbook: "docs/runbooks/platform.md#backendinstancedown"
               summary: "A backend instance (10.0.0.2:8000) cannot be scraped"
       - eval_time: 2m
         alertname: NoBackendInstances

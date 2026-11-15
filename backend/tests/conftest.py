@@ -51,6 +51,12 @@ class FakeRepo:
     def __init__(self):
         self.files: dict[str, FileRecord] = {}
         self.audit: list[dict] = []
+        self.chain: list[dict] = []   # audit hash chain (tests tamper with it directly)
+        self.scrub: dict[str, dict] = {}  # file_id -> {verified_at, status}
+        self.faults: dict[str, dict] = {}   # chaos faults
+        self.file_keys: dict[str, dict] = {}  # per-file wrapped keys
+        self.logins: dict[str, dict] = {}     # failed-login counters
+        self.replicas: dict[str, dict] = {}  # file_id -> {storage, storage_key, status}
         self.readings: dict[tuple, dict] = {}
         self.uploads: dict[str, dict] = {}
         self.upload_chunks: dict[str, dict[int, dict]] = {}
@@ -135,6 +141,131 @@ class FakeRepo:
                 "details": details,
             }
         )
+        # the same hash chain PostgresRepo keeps (kept apart so list_audit's shape is unchanged)
+        import audit_chain
+
+        row = {"id": self.audit[-1]["id"], "file_id": file_id, "action": action,
+               "username": user, "trace_id": trace_id, "details": details,
+               "created_at": audit_chain.now_utc()}
+        prev = self.chain[-1]["row_hash"] if self.chain else audit_chain.GENESIS
+        self.chain.append({**row, "seq": len(self.chain) + 1, "prev_hash": prev,
+                           "row_hash": audit_chain.row_hash(prev, row)})
+
+    async def verify_audit_chain(self):
+        import audit_chain
+
+        verifier = audit_chain.ChainVerifier()
+        for row in self.chain:
+            verifier.feed(row)
+        return verifier.result()
+
+    # ---- background scrubber (mirrors PostgresRepo semantics) ----
+    async def claim_for_scrub(self, categories, max_bytes, recheck_seconds, limit):
+        now, picked = time.time(), []
+        ordered = sorted(self.files.values(),
+                         key=lambda r: (self.scrub.get(r.id, {}).get("verified_at") or 0))
+        for rec in ordered:
+            st = self.scrub.setdefault(rec.id, {"verified_at": None, "status": None})
+            due = st["verified_at"] is None or now - st["verified_at"] > recheck_seconds
+            if rec.category in categories and rec.size_bytes <= max_bytes and due:
+                st.update(verified_at=now, status="checking")
+                picked.append(rec)
+                if len(picked) == limit:
+                    break
+        return picked
+
+    async def finish_scrub(self, file_id, status):
+        st = self.scrub.setdefault(file_id, {"verified_at": None, "status": None})
+        if status is None:
+            st.update(verified_at=None, status=None)
+        else:
+            st.update(verified_at=time.time(), status=status)
+
+    # ---- per-file keys and login attempts (mirror PostgresRepo) ----
+    async def put_file_key(self, file_id, wrapped):
+        self.file_keys.setdefault(file_id, {"wrapped": bytes(wrapped), "status": "active"})
+
+    async def get_file_key(self, file_id):
+        row = self.file_keys.get(file_id)
+        return dict(row) if row else None
+
+    async def erase_file_key(self, file_id, by):
+        row = self.file_keys.get(file_id)
+        if not row or row["status"] != "active":
+            return False
+        row.update(wrapped=None, status="erased", erased_by=by)
+        return True
+
+    async def list_file_keys(self, after, limit):
+        ids = sorted(i for i, r in self.file_keys.items() if r["status"] == "active" and (after is None or i > after))
+        return [{"file_id": i, "wrapped": self.file_keys[i]["wrapped"]} for i in ids[:limit]]
+
+    async def replace_file_key(self, file_id, wrapped):
+        if self.file_keys.get(file_id, {}).get("status") == "active":
+            self.file_keys[file_id]["wrapped"] = bytes(wrapped)
+
+    async def login_state(self, email):
+        row = self.logins.get(email)
+        return (row["failures"], time.time() - row["last"]) if row else (0, None)
+
+    async def login_failed(self, email):
+        row = self.logins.setdefault(email, {"failures": 0, "last": 0.0})
+        row["failures"] += 1
+        row["last"] = time.time()
+        return row["failures"]
+
+    async def login_ok(self, email):
+        self.logins.pop(email, None)
+
+    # ---- chaos faults (mirrors PostgresRepo; time is real) ----
+    async def set_fault(self, target, kind, seconds, duration, by):
+        self.faults[target] = {"target": target, "kind": kind, "seconds": float(seconds),
+                               "created_by": by, "until": time.time() + duration}
+
+    async def clear_faults(self, target=None):
+        gone = [t for t in self.faults if target in (None, t)]
+        for t in gone:
+            del self.faults[t]
+        return len(gone)
+
+    async def active_faults(self):
+        now = time.time()
+        return [{"target": f["target"], "kind": f["kind"], "seconds": f["seconds"],
+                 "created_by": f["created_by"], "expires_at": datetime.fromtimestamp(f["until"], timezone.utc).isoformat(),
+                 "remaining_seconds": round(f["until"] - now, 1)}
+                for f in sorted(self.faults.values(), key=lambda f: f["target"]) if f["until"] > now]
+
+    async def expired_faults(self):
+        now = time.time()
+        gone = [t for t, f in self.faults.items() if f["until"] <= now]
+        for t in gone:
+            del self.faults[t]
+        return gone
+
+    # ---- replicas (mirrors PostgresRepo) ----
+    async def set_replica(self, file_id, storage, storage_key, status):
+        self.replicas[file_id] = {"storage": storage, "storage_key": storage_key, "status": status}
+
+    async def get_replica(self, file_id):
+        r = self.replicas.get(file_id)
+        return dict(r) if r else None
+
+    async def replica_stats(self):
+        st = [r["status"] for r in self.replicas.values()]
+        return {"total": len(st), "ok": st.count("ok"), "pending": st.count("pending"),
+                "failed": st.count("failed")}
+
+    async def scrub_stats(self, categories):
+        recs = [r for r in self.files.values() if r.category in categories]
+        sts = [self.scrub.get(r.id, {}) for r in recs]
+        last = max((s.get("verified_at") or 0 for s in sts), default=0)
+        return {
+            "files_total": len(recs),
+            "verified_ok": sum(1 for s in sts if s.get("status") == "ok"),
+            "failed": sum(1 for s in sts if s.get("status") == "failed"),
+            "never_checked": sum(1 for s in sts if not s.get("verified_at")),
+            "last_checked_at": datetime.fromtimestamp(last, timezone.utc).isoformat() if last else None,
+        }
 
     async def list_audit(self, file_id):
         return [a for a in reversed(self.audit) if a["file_id"] == file_id]

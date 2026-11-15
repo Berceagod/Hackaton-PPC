@@ -9,6 +9,8 @@ from typing import Protocol
 
 import asyncpg
 
+import audit_chain
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files_metadata (
     id           UUID PRIMARY KEY,
@@ -102,7 +104,60 @@ CREATE TABLE IF NOT EXISTS policies_config (
     priority    TEXT        NOT NULL,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- tamper-evident audit chain (improvements.md 2.3): seq orders the chain; rows written
+-- before this change have NULL hashes and are simply not part of it
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS seq       BIGSERIAL;
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS prev_hash CHAR(64);
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS row_hash  CHAR(64);
+CREATE INDEX IF NOT EXISTS idx_audit_seq ON audit_logs (seq);
+
+-- background scrubber (improvements.md 2.2): when each file was last re-verified
+ALTER TABLE files_metadata ADD COLUMN IF NOT EXISTS verified_at   TIMESTAMPTZ;
+ALTER TABLE files_metadata ADD COLUMN IF NOT EXISTS verify_status TEXT;  -- checking | ok | failed
+CREATE INDEX IF NOT EXISTS idx_files_scrub ON files_metadata (category, verified_at NULLS FIRST);
+
+-- per-file random keys, stored only wrapped by the master key (improvements.md 2.5). A row with
+-- wrapped = NULL and status 'erased' is a tombstone: the file's key was destroyed on purpose.
+CREATE TABLE IF NOT EXISTS file_keys (
+    file_id    UUID PRIMARY KEY,
+    wrapped    BYTEA,
+    status     TEXT        NOT NULL DEFAULT 'active',   -- active | erased
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    erased_at  TIMESTAMPTZ,
+    erased_by  TEXT
+);
+
+-- failed logins per account, for lockout with backoff (improvements.md 2.5)
+CREATE TABLE IF NOT EXISTS login_attempts (
+    email        TEXT PRIMARY KEY,
+    failures     INTEGER     NOT NULL,
+    last_failure TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_last ON login_attempts (last_failure);
+
+-- chaos console (improvements.md 2.1): injected faults, shared by every replica, self-expiring
+CREATE TABLE IF NOT EXISTS chaos_faults (
+    target     TEXT PRIMARY KEY,            -- s3 | ftp | postgres | network
+    kind       TEXT        NOT NULL,        -- down | slow | bad
+    seconds    DOUBLE PRECISION NOT NULL DEFAULT 0,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_by TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- second copy of a file on another storage (improvements.md 2.2): ok | pending (not written
+-- yet or last write failed; the scrubber completes it) | failed (copy found damaged, repair failed)
+CREATE TABLE IF NOT EXISTS file_replicas (
+    file_id     UUID PRIMARY KEY,
+    storage     TEXT        NOT NULL,
+    storage_key TEXT        NOT NULL,
+    status      TEXT        NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
+
+AUDIT_LOCK = 7461003  # serialises appends so the chain has one order
 
 
 @dataclass
@@ -189,6 +244,28 @@ class Repo(Protocol):
     async def analytics_snapshot(self) -> dict: ...
 
     # ---- slice J (scale-out) Repo protocol methods: add directly below this line ----
+
+    # audit chain and scrubber (improvements.md)
+    async def verify_audit_chain(self) -> dict: ...
+    async def claim_for_scrub(
+        self, categories: list[str], max_bytes: int, recheck_seconds: float, limit: int
+    ) -> "list[FileRecord]": ...
+    async def finish_scrub(self, file_id: str, status: str | None) -> None: ...
+    async def scrub_stats(self, categories: list[str]) -> dict: ...
+    async def set_replica(self, file_id: str, storage: str, storage_key: str, status: str) -> None: ...
+    async def get_replica(self, file_id: str) -> dict | None: ...
+    async def replica_stats(self) -> dict: ...
+    async def put_file_key(self, file_id: str, wrapped: bytes) -> None: ...
+    async def get_file_key(self, file_id: str) -> dict | None: ...
+    async def erase_file_key(self, file_id: str, by: str) -> bool: ...
+    async def list_file_keys(self, after: str | None, limit: int) -> list[dict]: ...
+    async def replace_file_key(self, file_id: str, wrapped: bytes) -> None: ...
+    async def login_state(self, email: str) -> tuple[int, float | None]: ...
+    async def login_failed(self, email: str) -> int: ...
+    async def login_ok(self, email: str) -> None: ...
+    async def set_fault(self, target: str, kind: str, seconds: float, duration: float, by: str) -> None: ...
+    async def clear_faults(self, target: str | None = None) -> int: ...
+    async def active_faults(self) -> list[dict]: ...
 
 
 _COLS = (
@@ -518,17 +595,42 @@ class PostgresRepo:
         return [_row_to_record(r) for r in rows]
 
     async def add_audit(self, file_id, action, user, trace_id, details) -> None:
+        """Append to the hash chain. One writer at a time (advisory lock held until commit),
+        so `seq` order, `prev_hash` and the insert can never interleave."""
+        row = {
+            "id": uuid.uuid4(),
+            "file_id": uuid.UUID(file_id),
+            "action": action,
+            "username": user,
+            "trace_id": trace_id,
+            "details": details,
+            "created_at": audit_chain.now_utc(),
+        }
         async with self._pool.acquire() as con:
-            await con.execute(
-                "INSERT INTO audit_logs (id, file_id, action, username, trace_id, details) "
-                "VALUES ($1,$2,$3,$4,$5,$6)",
-                uuid.uuid4(),
-                uuid.UUID(file_id),
-                action,
-                user,
-                trace_id,
-                details,
-            )
+            async with con.transaction():
+                await con.execute("SELECT pg_advisory_xact_lock($1)", AUDIT_LOCK)
+                prev = await con.fetchval(
+                    "SELECT row_hash FROM audit_logs WHERE row_hash IS NOT NULL "
+                    "ORDER BY seq DESC LIMIT 1"
+                )
+                prev = (prev or audit_chain.GENESIS).strip()
+                await con.execute(
+                    "INSERT INTO audit_logs (id, file_id, action, username, trace_id, details, "
+                    "created_at, prev_hash, row_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                    row["id"], row["file_id"], action, user, trace_id, details,
+                    row["created_at"], prev, audit_chain.row_hash(prev, row),
+                )
+
+    async def verify_audit_chain(self) -> dict:
+        verifier = audit_chain.ChainVerifier()
+        async with self._pool.acquire() as con:
+            async with con.transaction():  # a cursor needs a transaction; rows stream, no big list
+                async for r in con.cursor(
+                    "SELECT seq, id, file_id, action, username, trace_id, details, created_at, "
+                    "prev_hash, row_hash FROM audit_logs WHERE row_hash IS NOT NULL ORDER BY seq"
+                ):
+                    verifier.feed(dict(r))
+        return verifier.result()
 
     async def list_audit(self, file_id: str) -> list[dict]:
         async with self._pool.acquire() as con:
@@ -781,3 +883,168 @@ class PostgresRepo:
         return snap
 
     # ---- slice J (scale-out) PostgresRepo methods: add directly below this line ----
+
+    # ---- background scrubber (improvements.md 2.2) ----
+    async def claim_for_scrub(self, categories, max_bytes, recheck_seconds, limit):
+        """Take the files whose last check is oldest (never-checked first). Marking them
+        'checking' in the same statement, with SKIP LOCKED, lets several workers and replicas
+        scrub at once without ever taking the same file twice."""
+        async with self._pool.acquire() as con:
+            rows = await con.fetch(
+                "WITH picked AS ("
+                "  SELECT id FROM files_metadata"
+                "  WHERE category = ANY($1) AND size_bytes <= $2"
+                "    AND (verified_at IS NULL OR verified_at < now() - make_interval(secs => $3))"
+                "  ORDER BY verified_at NULLS FIRST, created_at"
+                "  LIMIT $4 FOR UPDATE SKIP LOCKED) "
+                "UPDATE files_metadata f SET verified_at = now(), verify_status = 'checking' "
+                "FROM picked WHERE f.id = picked.id "
+                "RETURNING f.id, f.filename, f.category, f.storage, f.storage_key, f.size_bytes, "
+                "f.sha256, f.encrypted, f.trace_id, f.zone, f.station, f.description, "
+                "f.uploaded_by, f.created_at",
+                list(categories), int(max_bytes), float(recheck_seconds), int(limit),
+            )
+        return [_row_to_record(r) for r in rows]
+
+    async def finish_scrub(self, file_id: str, status: str | None) -> None:
+        """status None = could not check (storage down): back to the front of the queue."""
+        async with self._pool.acquire() as con:
+            if status is None:
+                await con.execute(
+                    "UPDATE files_metadata SET verified_at = NULL, verify_status = NULL "
+                    "WHERE id = $1", uuid.UUID(file_id))
+            else:
+                await con.execute(
+                    "UPDATE files_metadata SET verified_at = now(), verify_status = $2 "
+                    "WHERE id = $1", uuid.UUID(file_id), status)
+
+    async def scrub_stats(self, categories) -> dict:
+        async with self._pool.acquire() as con:
+            row = await con.fetchrow(
+                "SELECT count(*) FILTER (WHERE verify_status = 'ok') AS ok, "
+                "count(*) FILTER (WHERE verify_status = 'failed') AS failed, "
+                "count(*) FILTER (WHERE verified_at IS NULL) AS never_checked, "
+                "count(*) AS total, max(verified_at) AS last_checked "
+                "FROM files_metadata WHERE category = ANY($1)", list(categories))
+        return {
+            "files_total": int(row["total"]),
+            "verified_ok": int(row["ok"]),
+            "failed": int(row["failed"]),
+            "never_checked": int(row["never_checked"]),
+            "last_checked_at": row["last_checked"].isoformat() if row["last_checked"] else None,
+        }
+
+    # ---- replicas (improvements.md 2.2) ----
+    async def set_replica(self, file_id, storage, storage_key, status) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute(
+                "INSERT INTO file_replicas (file_id, storage, storage_key, status) "
+                "VALUES ($1,$2,$3,$4) ON CONFLICT (file_id) DO UPDATE SET "
+                "storage = EXCLUDED.storage, storage_key = EXCLUDED.storage_key, "
+                "status = EXCLUDED.status, updated_at = now()",
+                uuid.UUID(file_id), storage, storage_key, status)
+
+    async def get_replica(self, file_id) -> dict | None:
+        async with self._pool.acquire() as con:
+            row = await con.fetchrow(
+                "SELECT storage, storage_key, status FROM file_replicas WHERE file_id = $1",
+                uuid.UUID(file_id))
+        return dict(row) if row else None
+
+    async def replica_stats(self) -> dict:
+        async with self._pool.acquire() as con:
+            rows = await con.fetch("SELECT status, count(*)::int AS n FROM file_replicas GROUP BY status")
+        counts = {r["status"]: r["n"] for r in rows}
+        return {"total": sum(counts.values()), "ok": counts.get("ok", 0),
+                "pending": counts.get("pending", 0), "failed": counts.get("failed", 0)}
+
+    # ---- chaos faults (improvements.md 2.1) ----
+    async def set_fault(self, target, kind, seconds, duration, by) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute(
+                "INSERT INTO chaos_faults (target, kind, seconds, expires_at, created_by) "
+                "VALUES ($1,$2,$3, now() + make_interval(secs => $4), $5) "
+                "ON CONFLICT (target) DO UPDATE SET kind = EXCLUDED.kind, seconds = EXCLUDED.seconds, "
+                "expires_at = EXCLUDED.expires_at, created_by = EXCLUDED.created_by, created_at = now()",
+                target, kind, float(seconds), float(duration), by)
+
+    async def clear_faults(self, target=None) -> int:
+        async with self._pool.acquire() as con:
+            if target is None:
+                res = await con.execute("DELETE FROM chaos_faults")
+            else:
+                res = await con.execute("DELETE FROM chaos_faults WHERE target = $1", target)
+        return int(res.split()[-1])
+
+    async def active_faults(self) -> list[dict]:
+        async with self._pool.acquire() as con:
+            rows = await con.fetch(
+                "SELECT target, kind, seconds, created_by, expires_at, "
+                "extract(epoch FROM (expires_at - now())) AS remaining "
+                "FROM chaos_faults WHERE expires_at > now() ORDER BY target")
+        return [{"target": r["target"], "kind": r["kind"], "seconds": float(r["seconds"]),
+                 "created_by": r["created_by"], "expires_at": r["expires_at"].isoformat(),
+                 "remaining_seconds": round(float(r["remaining"]), 1)} for r in rows]
+
+    async def expired_faults(self) -> list[str]:
+        """Targets whose fault ran out (the reaper undoes anything outside the database)."""
+        async with self._pool.acquire() as con:
+            rows = await con.fetch("DELETE FROM chaos_faults WHERE expires_at <= now() RETURNING target")
+        return [r["target"] for r in rows]
+
+    # ---- per-file keys (improvements.md 2.5) ----
+    async def put_file_key(self, file_id, wrapped) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute(
+                "INSERT INTO file_keys (file_id, wrapped) VALUES ($1, $2) "
+                "ON CONFLICT (file_id) DO NOTHING", uuid.UUID(file_id), bytes(wrapped))
+
+    async def get_file_key(self, file_id) -> dict | None:
+        async with self._pool.acquire() as con:
+            row = await con.fetchrow(
+                "SELECT wrapped, status FROM file_keys WHERE file_id = $1", uuid.UUID(file_id))
+        return {"wrapped": row["wrapped"], "status": row["status"]} if row else None
+
+    async def erase_file_key(self, file_id, by) -> bool:
+        """Destroy the wrapped key (tombstone). False when the file never had one."""
+        async with self._pool.acquire() as con:
+            res = await con.execute(
+                "UPDATE file_keys SET wrapped = NULL, status = 'erased', erased_at = now(), "
+                "erased_by = $2 WHERE file_id = $1 AND status = 'active'", uuid.UUID(file_id), by)
+        return res.endswith("1")
+
+    async def list_file_keys(self, after, limit) -> list[dict]:
+        async with self._pool.acquire() as con:
+            rows = await con.fetch(
+                "SELECT file_id::text AS file_id, wrapped FROM file_keys "
+                "WHERE status = 'active' AND ($1::uuid IS NULL OR file_id > $1::uuid) "
+                "ORDER BY file_id LIMIT $2", uuid.UUID(after) if after else None, int(limit))
+        return [dict(r) for r in rows]
+
+    async def replace_file_key(self, file_id, wrapped) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute(
+                "UPDATE file_keys SET wrapped = $2 WHERE file_id = $1 AND status = 'active'",
+                uuid.UUID(file_id), bytes(wrapped))
+
+    # ---- login lockout (improvements.md 2.5) ----
+    async def login_state(self, email) -> tuple[int, float | None]:
+        """(consecutive failures, seconds since the last one) for this account."""
+        async with self._pool.acquire() as con:
+            row = await con.fetchrow(
+                "SELECT failures, extract(epoch FROM (now() - last_failure)) AS ago "
+                "FROM login_attempts WHERE email = $1", email)
+        return (int(row["failures"]), float(row["ago"])) if row else (0, None)
+
+    async def login_failed(self, email) -> int:
+        async with self._pool.acquire() as con:
+            await con.execute("DELETE FROM login_attempts WHERE last_failure < now() - interval '1 day'")
+            row = await con.fetchrow(
+                "INSERT INTO login_attempts (email, failures, last_failure) VALUES ($1, 1, now()) "
+                "ON CONFLICT (email) DO UPDATE SET failures = login_attempts.failures + 1, "
+                "last_failure = now() RETURNING failures", email)
+        return int(row["failures"])
+
+    async def login_ok(self, email) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute("DELETE FROM login_attempts WHERE email = $1", email)

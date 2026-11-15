@@ -19,7 +19,9 @@ from dataclasses import dataclass
 from fastapi import HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
+import keystore
 import metrics
+import replication
 from crypto_envelope import DecryptionError, decrypt_stream, encrypt_stream
 from integrity import HashingStream, upload_chunks
 from policies import CATEGORIES
@@ -227,7 +229,7 @@ async def _assemble(deps, principal, trace_id, session, policy, target, staging)
     file_id = str(uuid.uuid4())
     final_key = f"{session['category']}/{file_id}"
 
-    master_key = deps.settings.master_key
+    master_key = deps.settings.master_key   # staged chunks keep the master-derived key
     encrypted = bool(session.get("encrypted"))
 
     async def joined():
@@ -239,7 +241,9 @@ async def _assemble(deps, principal, trace_id, session, policy, target, staging)
                 yield piece
 
     stream = HashingStream(joined())
-    body = encrypt_stream(stream, master_key, file_id) if encrypted else stream
+    # the assembled file gets its own random key (stored wrapped), like a direct upload
+    body = (encrypt_stream(stream, await keystore.new_file_key(deps, file_id), file_id)
+            if encrypted else stream)
     try:
         await target.put_stream(final_key, body)
         size = stream.size
@@ -314,6 +318,11 @@ async def _assemble(deps, principal, trace_id, session, policy, target, staging)
         file_id, "upload", principal.email, trace_id,
         f"Upload pe bucăți ({total} bucăți) {session['category']} → {target.name}",
     )
+    if policy.replicas:  # second copy on another storage; never fails the stored upload
+        try:
+            await replication.replicate(deps, rec, policy, principal.email)
+        except Exception:
+            log.exception("replication step failed", extra={"file_id": file_id})
     await _delete_staging(staging, upload_id, total)
     log.info("chunked upload stored", extra={"upload_id": upload_id, "file_id": file_id,
                                              "storage": target.name, "size": size})

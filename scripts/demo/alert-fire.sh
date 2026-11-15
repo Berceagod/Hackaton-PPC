@@ -63,7 +63,9 @@ cleanup() {
   $CURL -o /dev/null -X PUT "$BASE/admin/policies" -H "$ADMIN" -d "$ORIG_DOCS_POLICY" || true
   if [ -n "$DOC_ID" ]; then
     MSYS_NO_PATHCONV=1 docker compose exec -T ftp sh -c "rm -f /home/filegrid/connection_docs/$DOC_ID" >/dev/null 2>&1 || true
-    sql "delete from audit_logs where file_id='$DOC_ID'; delete from files_metadata where id='$DOC_ID'" >/dev/null 2>&1 || true
+    # the file's audit rows stay: an audit trail is never edited, and deleting them would break
+    # the tamper-evident chain (GET /audit/verify)
+    sql "delete from files_metadata where id='$DOC_ID'" >/dev/null 2>&1 || true
   fi
   if [ -n "$UPLOAD_ID" ]; then
     sql "delete from upload_sessions where id='$UPLOAD_ID'" >/dev/null 2>&1 || true
@@ -176,7 +178,7 @@ if [ "$MODE" != "quick" ]; then
   cleanup_done=0
   $CURL -o /dev/null -X PUT "$BASE/admin/policies" -H "$ADMIN" -d "$ORIG_DOCS_POLICY"
   MSYS_NO_PATHCONV=1 docker compose exec -T ftp sh -c "rm -f /home/filegrid/connection_docs/$DOC_ID" >/dev/null 2>&1 || true
-  sql "delete from audit_logs where file_id='$DOC_ID'; delete from files_metadata where id='$DOC_ID'" >/dev/null
+  sql "delete from files_metadata where id='$DOC_ID'" >/dev/null   # audit rows stay (see cleanup above)
   DOC_ID=""
   sql "delete from upload_sessions where id='$UPLOAD_ID'" >/dev/null   # (staging chunk removed by the exit trap)
   for a in PersonalDataStoredUnencrypted VideoUploadStalled; do

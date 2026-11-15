@@ -17,6 +17,7 @@ groups:
         for: 1m
         labels: { severity: critical, guarantee: "meter_readings: never lost" }
         annotations:
+          runbook: "docs/runbooks/meter-readings.md#meterreadingsnotarriving"
           summary: "No meter reading accepted for 2 minutes (a gap in the data)"
           description: "Readings were arriving, now none is accepted. Check the meters/simulator, the gateway and the backend."
 
@@ -25,6 +26,7 @@ groups:
         expr: increase(sim_dropped_total[2m]) > 0
         labels: { severity: critical, guarantee: "meter_readings: never lost" }
         annotations:
+          runbook: "docs/runbooks/meter-readings.md#meterreadingslostatsender"
           summary: "Meters dropped {{ $value | printf \"%.0f\" }} reading(s): their backlog is full"
           description: "FileGrid was unreachable for longer than a meter can buffer. Those readings are gone for good."
 
@@ -34,6 +36,7 @@ groups:
         for: 1m
         labels: { severity: warning, guarantee: "meter_readings: never lost" }
         annotations:
+          runbook: "docs/runbooks/meter-readings.md#meterreadingswaitingatsender"
           summary: "{{ $value | printf \"%.0f\" }} reading(s) waiting at the meters for FileGrid"
           description: "Delivery is delayed. If this keeps growing, meters will start dropping readings."
 
@@ -44,6 +47,7 @@ groups:
         for: 1m
         labels: { severity: critical, guarantee: "meter_readings: never lost" }
         annotations:
+          runbook: "docs/runbooks/meter-readings.md#meterreadingservererrors"
           summary: "More than 5% of meter readings fail with a server error ({{ $value | humanizePercentage }})"
           description: "Meters will retry, but a sustained failure rate puts readings at risk."
 
@@ -53,6 +57,7 @@ groups:
         for: 1m
         labels: { severity: warning, guarantee: "meter_readings: never lost" }
         annotations:
+          runbook: "docs/runbooks/meter-readings.md#meteroutboxbacklog"
           summary: "{{ $value | printf \"%.0f\" }} accepted reading(s) are not yet in their storage"
           description: "They are safe in the metadata database and will be written out when the storage is back (outbox)."
 
@@ -61,6 +66,7 @@ groups:
         for: 2m
         labels: { severity: critical, guarantee: "meter_readings: never lost" }
         annotations:
+          runbook: "docs/runbooks/meter-readings.md#meteroutboxgrowing"
           summary: "The meter outbox holds {{ $value | printf \"%.0f\" }} readings and is not draining"
           description: "The storage for meter readings has been unavailable for a long time. Restore it before the metadata database fills up."
 
@@ -72,6 +78,7 @@ groups:
         for: 30s
         labels: { severity: warning, guarantee: "meter_readings: never duplicated" }
         annotations:
+          runbook: "docs/runbooks/meter-readings.md#meterduplicatereadingshigh"
           summary: "{{ $value | humanizePercentage }} of incoming meter readings are duplicates"
           description: "They are all rejected (HTTP 409) and none is stored twice, but a sender is re-sending the same readings (retry storm, clock reset or replay)."
 
@@ -84,6 +91,7 @@ groups:
         for: 1m
         labels: { severity: critical, guarantee: "outage_records: available immediately" }
         annotations:
+          runbook: "docs/runbooks/outage-records.md#outagerecordingestslow"
           summary: "Saving an outage record takes {{ $value | printf \"%.1f\" }} s at p95 (limit 2 s)"
           description: "A record is acknowledged only after it is stored, so this is how long dispatchers wait for it to exist."
 
@@ -93,6 +101,7 @@ groups:
         for: 1m
         labels: { severity: critical, guarantee: "outage_records: available immediately" }
         annotations:
+          runbook: "docs/runbooks/outage-records.md#outagerecorddownloadslow"
           summary: "Opening an outage record takes {{ $value | printf \"%.1f\" }} s at p95 (limit 3 s)"
           description: "Dispatchers are waiting for outage records. Look at the storage latency panel."
 
@@ -104,8 +113,28 @@ groups:
         for: 30s
         labels: { severity: critical, guarantee: "connection_docs: personal data protected" }
         annotations:
+          runbook: "docs/runbooks/connection-docs.md#personaldatastoredunencrypted"
           summary: "{{ $value | printf \"%.0f\" }} connection document(s) are stored WITHOUT encryption"
           description: "Someone with direct access to the storage could read personal data. Check the connection_docs policy (encryption must be true) and re-protect or remove the files."
+
+  # SLO (improvements.md 2.8): 99.5 % of outage records are saved within 2.5 s. The budget is
+  # the 0.5 % that may be slower; this fires when 5 % (ten times the budget) were slower over
+  # the last 10 minutes, with enough traffic to mean something.
+  - name: slo-outage-records
+    rules:
+      - alert: OutageIngestSLOBurn
+        expr: |
+          (
+            1 - sum(rate(filegrid_request_duration_seconds_bucket{category="outage_records",operation="ingest",le="2.5"}[10m]))
+              / sum(rate(filegrid_request_duration_seconds_count{category="outage_records",operation="ingest"}[10m]))
+          ) > 0.05
+          and sum(rate(filegrid_request_duration_seconds_count{category="outage_records",operation="ingest"}[10m])) > 0.02
+        for: 2m
+        labels: { severity: warning, guarantee: "outage records: 99.5 % saved within 2.5 s (SLO)" }
+        annotations:
+          runbook: "docs/runbooks/outage-records.md#outageingestsloburn"
+          summary: "More than 5 % of outage records took over 2.5 s to save in the last 10 minutes (the SLO allows 0.5 %)"
+          description: "The error budget is burning ten times faster than allowed. Check the slow storage and the bulkhead panel."
 
   # ------------------------------------------------------------------ integrity (all categories)
   - name: guarantee-integrity             # a corrupt file is never served silently
@@ -115,8 +144,28 @@ groups:
           sum by (category, storage, reason) (increase(filegrid_integrity_failures_total{reason=~"checksum_mismatch|object_missing|decryption_failed|staging_corrupted"}[5m])) > 0
         labels: { severity: critical, guarantee: "integrity: a corrupt file is never served" }
         annotations:
+          runbook: "docs/runbooks/integrity.md#fileintegrityfailure"
           summary: "A {{ $labels.category }} file failed its integrity check on {{ $labels.storage }} ({{ $labels.reason }})"
           description: "The download was blocked (HTTP 409) and nothing corrupt was served. The stored data is damaged or missing: investigate the storage."
+
+      # Self-healing (improvements.md 2.2): damage that a second copy repaired is information,
+      # not a page. If the repair itself fails, that is critical.
+      - alert: FileRepaired
+        expr: |
+          sum by (category, storage, kind) (increase(filegrid_repairs_total{outcome="ok"}[5m])) > 0
+        labels: { severity: info, guarantee: "integrity: damage is repaired from a second copy" }
+        annotations:
+          runbook: "docs/runbooks/integrity.md#filerepaired"
+          summary: "A {{ $labels.category }} {{ $labels.kind }} copy on {{ $labels.storage }} was damaged and repaired from its other copy"
+          description: "Nothing was lost and no damaged byte was served. The storage that held the damaged copy deserves a look (disk, bit rot, someone writing to it directly)."
+      - alert: RepairFailed
+        expr: |
+          sum by (category, storage, kind) (increase(filegrid_repairs_total{outcome="failed"}[5m])) > 0
+        labels: { severity: critical, guarantee: "integrity: damage is repaired from a second copy" }
+        annotations:
+          runbook: "docs/runbooks/integrity.md#repairfailed"
+          summary: "Repairing a {{ $labels.category }} {{ $labels.kind }} copy on {{ $labels.storage }} failed"
+          description: "A damaged copy could not be rewritten from its good copy (storage down or read-only). Until it is fixed the file has no redundancy."
 
   # ------------------------------------------------------------------ drone videos
   - name: guarantee-drone-videos          # transfer survives slow or unstable links
@@ -126,17 +175,30 @@ groups:
         for: 1m
         labels: { severity: warning, guarantee: "drone_videos: transfer survives bad links" }
         annotations:
+          runbook: "docs/runbooks/drone-videos.md#videouploadstalled"
           summary: "{{ $value | printf \"%.0f\" }} chunked upload(s) have stalled: no chunk received within the stall threshold (5 min by default)"
           description: "The upload is resumable: the field team's client should resume it, or it is purged after 24 h. Check the link quality."
 
   # ------------------------------------------------------------------ platform health
   - name: platform
     rules:
+      # improvements.md 2.8: the canary writes, reads back and deletes a tiny object on every
+      # storage every minute, so a broken storage is found even when nobody is uploading.
+      - alert: StorageCanaryFailing
+        expr: |
+          sum by (storage) (increase(filegrid_canary_runs_total{outcome="failed"}[3m])) >= 2
+        for: 30s
+        labels: { severity: warning, guarantee: "resilience: a broken storage is found without waiting for a user" }
+        annotations:
+          runbook: "docs/runbooks/platform.md#storagecanaryfailing"
+          summary: "The synthetic check on the {{ $labels.storage }} storage keeps failing"
+          description: "A tiny object could not be written, read back identically and deleted on this storage. Real uploads to it will fail too."
       - alert: StorageCircuitOpen
         expr: max by (storage) (filegrid_breaker_open) == 1
         for: 15s
         labels: { severity: warning, guarantee: "resilience: one storage down must not stop the others" }
         annotations:
+          runbook: "docs/runbooks/platform.md#storagecircuitopen"
           summary: "The {{ $labels.storage }} storage keeps failing: its circuit breaker is open"
           description: "Files for this storage fail fast; other categories are unaffected and meter readings wait in the outbox."
 
@@ -147,6 +209,7 @@ groups:
         for: 1m
         labels: { severity: warning, guarantee: "resilience: one storage down must not stop the others" }
         annotations:
+          runbook: "docs/runbooks/platform.md#storageerrorratehigh"
           summary: "{{ $value | humanizePercentage }} of {{ $labels.storage }} operations fail"
 
       - alert: CategoryAtCapacity
@@ -154,6 +217,7 @@ groups:
         for: 1m
         labels: { severity: warning, guarantee: "scalability: a spike in one category must not hurt the others" }
         annotations:
+          runbook: "docs/runbooks/platform.md#categoryatcapacity"
           summary: "{{ $labels.category }} requests are being refused: the category is at capacity"
           description: "Its own limit is full (HTTP 503). The other categories are unaffected. Add backend instances or raise its limit."
 
@@ -162,6 +226,7 @@ groups:
         for: 30s
         labels: { severity: critical, guarantee: "availability" }
         annotations:
+          runbook: "docs/runbooks/platform.md#backendinstancedown"
           summary: "A backend instance ({{ $labels.instance }}) cannot be scraped"
 
       - alert: NoBackendInstances
@@ -169,4 +234,5 @@ groups:
         for: 1m
         labels: { severity: critical, guarantee: "availability" }
         annotations:
+          runbook: "docs/runbooks/platform.md#nobackendinstances"
           summary: "No backend instance is reachable by Prometheus"
