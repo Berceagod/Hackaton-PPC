@@ -6,13 +6,33 @@ import { UploadPage } from './pages/UploadPage'
 import { FilesPage } from './pages/FilesPage'
 import { PoliciesPage } from './pages/PoliciesPage'
 import { AnalyticsPage } from './pages/AnalyticsPage'
+import { ChaosPage } from './pages/ChaosPage'
 import { getStoredSession, logout, SESSION_EXPIRED_EVENT } from './services/api'
 import type { AuthSession } from './types/filegrid'
 
+const TAB_IDS: AppTab[] = ['upload', 'files', 'policies', 'analytics', 'chaos']
+
+/** The page lives in the URL (#/files), so a refresh or a shared link stays on the same page. */
+function tabFromHash(): AppTab {
+  const id = window.location.hash.replace(/^#\/?/, '') as AppTab
+  return TAB_IDS.includes(id) ? id : 'upload'
+}
+
 export default function App() {
   const [session, setSession] = useState<AuthSession | null>(() => getStoredSession())
-  const [tab, setTab] = useState<AppTab>('upload')
+  const [tab, setTabState] = useState<AppTab>(() => tabFromHash())
   const [toasts, setToasts] = useState<ToastMessage[]>([])
+
+  const setTab = useCallback((next: AppTab) => {
+    setTabState(next)
+    if (window.location.hash !== `#/${next}`) window.location.hash = `/${next}`
+  }, [])
+
+  useEffect(() => {
+    const onHash = () => setTabState(tabFromHash())
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
 
   const pushToast = useCallback((t: Omit<ToastMessage, 'id'>) => {
     setToasts((prev) => [...prev, { ...t, id: crypto.randomUUID() }])
@@ -24,8 +44,7 @@ export default function App() {
 
   useEffect(() => {
     function onExpired() {
-      setSession(null)
-      setTab('upload')
+      setSession(null) // the page stays in the URL: after logging in again you are back where you were
       pushToast({
         kind: 'error',
         title: 'Sesiunea a expirat',
@@ -64,6 +83,7 @@ export default function App() {
         {tab === 'files' && <FilesPage pushToast={pushToast} />}
         {tab === 'policies' && <PoliciesPage pushToast={pushToast} />}
         {tab === 'analytics' && <AnalyticsPage pushToast={pushToast} />}
+        {tab === 'chaos' && session.user.role === 'admin' && <ChaosPage pushToast={pushToast} />}
       </main>
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
