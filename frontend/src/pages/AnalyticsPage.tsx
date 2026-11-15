@@ -21,6 +21,7 @@ import { getAnalyticsSummary } from '../services/api'
 import type { AnalyticsSummary } from '../types/filegrid'
 import { CATEGORY_LABELS } from '../types/filegrid'
 import { StorageBadge } from '../components/StorageBadge'
+import { LiveStorageLatency } from '../components/LiveStorageLatency'
 import type { ToastMessage } from '../components/Toast'
 
 interface AnalyticsPageProps {
@@ -108,6 +109,8 @@ export function AnalyticsPage({ pushToast }: AnalyticsPageProps) {
           Reîncarcă
         </button>
       </div>
+
+      <LiveStorageLatency />
 
       {/* Section A */}
       <section className="space-y-4">

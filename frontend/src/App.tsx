@@ -7,6 +7,7 @@ import { FilesPage } from './pages/FilesPage'
 import { PoliciesPage } from './pages/PoliciesPage'
 import { AnalyticsPage } from './pages/AnalyticsPage'
 import { ChaosPage } from './pages/ChaosPage'
+import { TestingOverlay } from './components/TestingOverlay'
 import { getStoredSession, logout, SESSION_EXPIRED_EVENT } from './services/api'
 import type { AuthSession } from './types/filegrid'
 
@@ -85,6 +86,7 @@ export default function App() {
         {tab === 'analytics' && <AnalyticsPage pushToast={pushToast} />}
         {tab === 'chaos' && session.user.role === 'admin' && <ChaosPage pushToast={pushToast} />}
       </main>
+      {session.user.role === 'admin' && <TestingOverlay pushToast={pushToast} />}
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   )
