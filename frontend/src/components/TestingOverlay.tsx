@@ -26,7 +26,7 @@ const JOB_HINT: Record<string, string> = {
   'outage-flood': '60 de avarii în paralel; verifică și dacă alte categorii sunt afectate.',
   'compare-storages': '25 s de scrieri și citiri pe PostgreSQL, S3 și FTP deodată.',
   duplicates: 'Retrimite 100 de citiri deja stocate; toate trebuie respinse.',
-  'day-vs-storm': 'Zi liniștită, apoi 10x contoare (≈15 s). Completează cele două bare din Secțiunea B.',
+  'day-vs-storm': 'Zi liniștită (3 avarii), apoi 30 de avarii deodată. Citirile, racordările și video-ul rămân la fel. Completează Secțiunea B.',
   'overload-flood':
     '240 de citiri exact în același moment: dacă storage-ul principal este depășit, surplusul merge pe cel de rezervă (setat în Politici).',
 }

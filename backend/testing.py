@@ -297,12 +297,15 @@ async def _overload_flood(deps, count: int = 240) -> dict:
                        f"Principal: {policy['storage']}, rezervă: {policy.get('fallback_storage') or 'fără'}.{note}"}
 
 
-async def _scenario(deps, meters: int, concurrency: int) -> dict:
-    """One phase: `meters` readings plus the quiet volume of the other categories, all at once,
-    timed client-side like the scenario scripts do."""
-    plan = [("meter_readings", meters), ("outage_records", 3), ("connection_docs", 2), ("drone_videos", 1)]
+# Quiet categories are started before the outage burst, so their clock is the request
+# itself while the burst is in flight, not the wait until every outage has finished.
+_SCENARIO_ORDER = ("meter_readings", "connection_docs", "drone_videos", "outage_records")
+
+
+async def _scenario(deps, counts: dict[str, int], concurrency: int) -> dict:
+    """One phase, timed client-side like the scenario scripts. `counts` is files per category."""
     sem = asyncio.Semaphore(concurrency)
-    out: dict = {cat: {"t": [], "ok": 0, "err": 0, "bytes": 0} for cat, _ in plan}
+    out: dict = {cat: {"t": [], "ok": 0, "err": 0, "bytes": 0} for cat in _SCENARIO_ORDER}
 
     async def one(cat: str, n: int):
         async with sem:
@@ -321,18 +324,20 @@ async def _scenario(deps, meters: int, concurrency: int) -> dict:
         stat["bytes"] += size if status == 202 else 0
 
     started = time.perf_counter()
-    await asyncio.gather(*[one(cat, n) for cat, count in plan for n in range(count)])
+    await asyncio.gather(*[one(cat, n) for cat in _SCENARIO_ORDER for n in range(counts[cat])])
     out["_wall"] = time.perf_counter() - started
     return out
 
 
 async def _day_vs_storm(deps) -> dict:
-    """Records the two bars of Analytics Section B: a quiet day, then 10x meter volume while the
-    other categories stay quiet (the method of scripts/scenarios/normal-day.sh and peak-day.sh)."""
+    """Analytics Section B: a quiet day, then a storm. A storm means many outage records
+    (10x), while meters, connection documents and the video stay at the quiet volume."""
     policies = await deps.policies.all()
+    quiet = {"meter_readings": 12, "outage_records": 3, "connection_docs": 2, "drone_videos": 1}
+    storm = {**quiet, "outage_records": quiet["outage_records"] * 10}
     summary = []
-    for scenario, meters, concurrency in (("normal", 12, 4), ("peak", 120, 40)):
-        result = await _scenario(deps, meters, concurrency)
+    for scenario, counts, concurrency in (("normal", quiet, 4), ("peak", storm, 24)):
+        result = await _scenario(deps, counts, concurrency)
         wall = max(result.pop("_wall"), 0.001)
         rows = []
         for cat, st in result.items():
@@ -346,7 +351,7 @@ async def _day_vs_storm(deps) -> dict:
                 "latency_p50_ms": _pct(ts, .5), "latency_p95_ms": _pct(ts, .95), "latency_p99_ms": _pct(ts, .99),
                 "throughput_mbps": round(st["bytes"] / wall / 1_000_000, 3), "bytes_total": st["bytes"]})
         await deps.repo.save_measurements("scenario", scenario, rows)
-        label = "Zi normală" if scenario == "normal" else "Vârf (10x contoare)"
+        label = "Zi normală" if scenario == "normal" else "Furtună (10x avarii)"
         summary.append(f"{label}: " + ", ".join(f"{r['category'].split('_')[0]} p95 {r['latency_p95_ms']} ms" for r in rows))
         await asyncio.sleep(2)
     return {"summary": " | ".join(summary) + ". Vezi Analytics → Secțiunea B (reîncărcați pagina)."}
