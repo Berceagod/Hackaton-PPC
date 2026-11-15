@@ -29,6 +29,12 @@ import metrics
 from routes.analytics import router as analytics_router
 
 # ---- slice J (scale-out) imports: add directly below this line ----
+from routes.trust import router as trust_router
+from routes.chaos import router as chaos_router
+from chaos import run_reaper
+from canary import run_canary
+from storage.chaos import ChaosStorage
+from scrubber import run_scrubber
 
 log = logging.getLogger("filegrid.main")
 
@@ -62,6 +68,10 @@ async def build_real_deps() -> Deps:
         log.warning("policy change notifications unavailable; falling back to periodic refresh")
 
     def breaker(storage):
+        # chaos console (off by default): faults are injected BELOW the breaker, so the system
+        # reacts to a simulated outage exactly as it does to a real one
+        if settings.chaos_enabled:
+            storage = ChaosStorage(storage, repo)
         return BreakerStorage(storage, settings.breaker_threshold,
                               settings.breaker_cooldown_seconds)
 
@@ -114,6 +124,9 @@ def create_app(deps: Deps | None = None) -> FastAPI:
             # ---- slice I (analytics) background tasks: tasks.append(...): add directly below this line ----
 
             # ---- slice J (scale-out) background tasks: tasks.append(...): add directly below this line ----
+            tasks.append(asyncio.create_task(run_scrubber(app.state.deps, stop)))
+            tasks.append(asyncio.create_task(run_reaper(app.state.deps, stop)))  # no-op unless CHAOS_ENABLED
+            tasks.append(asyncio.create_task(run_canary(app.state.deps, stop)))
         log.info("backend ready")
         yield
         stop.set()
@@ -147,6 +160,8 @@ def create_app(deps: Deps | None = None) -> FastAPI:
         app.include_router(analytics_router, prefix=prefix)
 
         # ---- slice J (scale-out) routers under /api/v1: add directly below this line ----
+        app.include_router(trust_router, prefix=prefix)  # audit chain, receipts, scrubber
+        app.include_router(chaos_router, prefix=prefix)  # chaos console (403 unless CHAOS_ENABLED)
     return app
 
 

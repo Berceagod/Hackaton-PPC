@@ -9,13 +9,14 @@ import { useEffect, useState } from 'react'
 import { getHealth, USE_MOCK, type ApiHealth } from '../services/api'
 import type { AuthUser } from '../types/filegrid'
 
-export type AppTab = 'upload' | 'files' | 'policies' | 'analytics'
+export type AppTab = 'upload' | 'files' | 'policies' | 'analytics' | 'chaos'
 
-const TABS: { id: AppTab; label: string }[] = [
+const TABS: { id: AppTab; label: string; adminOnly?: boolean }[] = [
   { id: 'upload', label: 'Încărcare' },
   { id: 'files', label: 'Fișiere & Audit' },
   { id: 'policies', label: 'Politici Rutare' },
   { id: 'analytics', label: 'Analytics' },
+  { id: 'chaos', label: 'Chaos', adminOnly: true },
 ]
 
 interface HeaderProps {
@@ -96,7 +97,7 @@ export function Header({ user, activeTab, onTabChange, onLogout }: HeaderProps) 
       </div>
 
       <nav className="mx-auto flex max-w-7xl gap-1 overflow-x-auto px-4 pb-2 scrollbar-thin">
-        {TABS.map((tab) => (
+        {TABS.filter((tab) => !tab.adminOnly || user.role === 'admin').map((tab) => (
           <button
             key={tab.id}
             type="button"

@@ -274,6 +274,29 @@ def guarantees() -> Board:
     b.series("Chunk upload rate", [t('sum(rate(filegrid_bytes_total{operation="chunk"}[RI]))', "chunks in")],
              w=12, h=5, unit="Bps")
 
+    b.row("Self-healing and early detection")
+    b.stat("Damage repaired from a copy (1 h)", 'sum(increase(filegrid_repairs_total{outcome="ok"}[1h])) or vector(0)', w=5, h=5,
+           steps=[{"color": "green", "value": None}, {"color": "blue", "value": 1}],
+           description="A damaged copy that was rewritten from the good one. Nothing lost, nothing damaged served.")
+    b.stat("Repairs that FAILED (1 h)", 'sum(increase(filegrid_repairs_total{outcome="failed"}[1h])) or vector(0)', w=5, h=5,
+           description="Must be 0. A damaged copy could not be rewritten: that file has no redundancy until it is fixed.")
+    b.stat("Second copies written (1 h)", 'sum(increase(filegrid_replica_writes_total{outcome="ok"}[1h])) or vector(0)', w=5, h=5,
+           steps=[{"color": "blue", "value": None}],
+           description="Per category policy: replicas=1 keeps a verified copy on another storage.")
+    b.stat("Copies still pending (1 h)", 'sum(increase(filegrid_replica_writes_total{outcome="pending"}[1h])) or vector(0)', w=5, h=5,
+           steps=[{"color": "green", "value": None}, {"color": "orange", "value": 1}],
+           description="A copy that could not be written at upload time; the scrubber completes it.")
+    b.stat("Canary failures (10 min)", 'sum(increase(filegrid_canary_runs_total{outcome="failed"}[10m])) or vector(0)', w=4, h=5,
+           description="The synthetic put/get/verify/delete on each storage, once a minute.")
+    b.series("Background scrubber: files checked", [
+        t("sum by (outcome) (rate(filegrid_scrub_files_total[RI])) > 0", "{{outcome}}")],
+        w=12, h=7, unit="ops", stack=True,
+        description="ok = verified; repaired = damage fixed from the other copy; failed = damaged and not repairable; skipped = storage was down.")
+    b.series("Storage canary round trip", [
+        t(quantile(0.95, "filegrid_canary_duration_seconds", "storage"), "{{storage}} p95")],
+        w=12, h=7, unit="s",
+        description="How long a 2 KB write+read+delete takes on each storage, with no user traffic involved.")
+
     b.row("Alerts")
     b.table("Alerts firing or pending", 'ALERTS{alertstate=~"firing|pending"}', h=6,
             description="Delivered to the team webhook by Alertmanager.",

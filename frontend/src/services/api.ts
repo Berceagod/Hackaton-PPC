@@ -932,6 +932,79 @@ export async function getAnalyticsSummary(): Promise<AnalyticsSummary> {
   return (await res.json()) as AnalyticsSummary
 }
 
+// ─── Chaos console (admin only, off unless CHAOS_ENABLED=true on the backend) ──────────
+
+export interface ChaosFault {
+  target: string // s3 | ftp | postgres | network
+  kind: 'down' | 'slow' | 'bad'
+  seconds: number
+  created_by: string
+  expires_at: string
+  remaining_seconds: number
+}
+
+export interface ChaosStatus {
+  enabled: boolean
+  max_seconds: number
+  default_seconds: number
+  faults?: ChaosFault[]
+  /** null = toxiproxy could not be reached (unknown) */
+  network_degraded?: boolean | null
+  storages?: Record<string, { circuit: 'closed' | 'open' | 'half_open' | string }>
+  recent?: { id: string; user: string; details?: string; timestamp?: string }[]
+}
+
+async function chaosCall(path: string, method: string, body?: unknown): Promise<unknown> {
+  const res = await apiFetch(`/admin/chaos${path}`, {
+    method,
+    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!res.ok) {
+    let detail = ''
+    try {
+      detail = ((await res.json()) as { detail?: string }).detail ?? ''
+    } catch {
+      // not JSON
+    }
+    throw new Error(detail || `Cerere eșuată: ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function getChaosStatus(): Promise<ChaosStatus> {
+  if (USE_MOCK) return { enabled: false, max_seconds: 600, default_seconds: 60 }
+  return (await chaosCall('', 'GET')) as ChaosStatus
+}
+
+export async function breakStorage(
+  name: string,
+  kind: 'down' | 'slow',
+  durationSeconds: number,
+  slowSeconds = 2,
+): Promise<void> {
+  await chaosCall(`/storage/${name}`, 'PUT', {
+    kind,
+    duration_seconds: durationSeconds,
+    ...(kind === 'slow' ? { seconds: slowSeconds } : {}),
+  })
+}
+
+export async function healStorage(name: string): Promise<void> {
+  await chaosCall(`/storage/${name}`, 'DELETE')
+}
+
+export async function setNetwork(mode: 'bad' | 'ok', durationSeconds = 30): Promise<void> {
+  await chaosCall('/network', 'PUT', {
+    mode,
+    ...(mode === 'bad' ? { duration_seconds: durationSeconds } : {}),
+  })
+}
+
+export async function clearChaos(): Promise<void> {
+  await chaosCall('', 'DELETE')
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`

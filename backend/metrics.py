@@ -121,6 +121,40 @@ UPLOADS_STALLED = Gauge(
     multiprocess_mode="livemax",
 )
 
+SCRUBBED = Counter(
+    "filegrid_scrub_files_total",
+    "Files re-verified by the background scrubber (ok, failed, or skipped: storage down)",
+    ["category", "storage", "outcome"],
+)
+
+REPAIRS = Counter(
+    "filegrid_repairs_total",
+    "Damaged copies rewritten from a good copy (outcome repaired) or that could not be (failed); "
+    "storage is the storage that was repaired, kind is primary or replica",
+    ["category", "storage", "kind", "outcome"],
+)
+LOGINS = Counter(
+    "filegrid_logins_total",
+    "Login attempts: ok, failed (wrong credentials) or locked (refused while an account is locked)",
+    ["outcome"],
+)
+CANARY = Counter(
+    "filegrid_canary_runs_total",
+    "Synthetic put/get/verify/delete of a tiny object on each storage, once a minute (ok or failed)",
+    ["storage", "outcome"],
+)
+CANARY_SECONDS = Histogram(
+    "filegrid_canary_duration_seconds",
+    "Duration of one successful canary round trip on a storage",
+    ["storage"],
+    buckets=BUCKETS,
+)
+REPLICA_WRITES = Counter(
+    "filegrid_replica_writes_total",
+    "Second copies written at ingest (ok) or left for the scrubber to complete (pending)",
+    ["category", "storage", "outcome"],
+)
+
 _GAUGE_FILE = re.compile(r"^gauge_live(?:sum|max|min|all|mostrecent)_(\d+)\.db$")
 
 INTEGRITY_REASONS = (
@@ -146,6 +180,16 @@ def _start_alert_series_at_zero() -> None:
     for storage in STORAGES:
         for outcome in ("ok", "duplicate", "queued", "client_error", "server_error"):
             REQUESTS.labels("meter_readings", storage, "ingest", outcome)
+    for outcome in ("ok", "failed", "locked"):
+        LOGINS.labels(outcome)
+    for storage in STORAGES:
+        CANARY.labels(storage, "failed")  # at 0, so the first failure is seen by increase()
+    for category in CATEGORIES:
+        for storage in STORAGES:
+            SCRUBBED.labels(category, storage, "failed")  # so the first failure is visible
+            for kind in ("primary", "replica"):  # at 0, so increase() sees the first repair
+                for outcome in ("ok", "failed"):
+                    REPAIRS.labels(category, storage, kind, outcome)
 
 
 _start_alert_series_at_zero()
@@ -180,6 +224,31 @@ def record(
 def integrity_failure(category: str, storage: str | None, reason: str) -> None:
     if category in CATEGORIES:
         INTEGRITY.labels(category, _storage_label(storage), reason).inc()
+
+
+def scrubbed(category: str, storage: str | None, outcome: str) -> None:
+    if category in CATEGORIES:
+        SCRUBBED.labels(category, _storage_label(storage), outcome).inc()
+
+
+def repaired(category: str, storage: str | None, kind: str, outcome: str) -> None:
+    if category in CATEGORIES:
+        REPAIRS.labels(category, _storage_label(storage), kind, outcome).inc()
+
+
+def login(outcome: str) -> None:
+    LOGINS.labels(outcome).inc()
+
+
+def canary(storage: str, outcome: str, seconds: float | None = None) -> None:
+    CANARY.labels(_storage_label(storage), outcome).inc()
+    if outcome == "ok" and seconds is not None:
+        CANARY_SECONDS.labels(_storage_label(storage)).observe(seconds)
+
+
+def replica_written(category: str, storage: str | None, outcome: str) -> None:
+    if category in CATEGORIES:
+        REPLICA_WRITES.labels(category, _storage_label(storage), outcome).inc()
 
 
 def bulkhead_rejected(category: str) -> None:

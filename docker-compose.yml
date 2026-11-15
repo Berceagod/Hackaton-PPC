@@ -17,6 +17,10 @@ x-backend-env: &backend-env
   SIMULATOR_TOKEN: ${SIMULATOR_TOKEN:?run ./start.sh}
   DISPECER_PASSWORD: ${DISPECER_PASSWORD:?run ./start.sh}
   ADMIN_PASSWORD: ${ADMIN_PASSWORD:?run ./start.sh}
+  AUDITOR_PASSWORD: ${AUDITOR_PASSWORD:-}   # optional account: reads audit trails, never file content
+  LOGIN_MAX_FAILURES: ${LOGIN_MAX_FAILURES:-5}
+  LOGIN_LOCK_BASE_SECONDS: ${LOGIN_LOCK_BASE_SECONDS:-30}
+  LOGIN_LOCK_MAX_SECONDS: ${LOGIN_LOCK_MAX_SECONDS:-900}
   FILEGRID_MASTER_KEY: ${FILEGRID_MASTER_KEY:?run ./start.sh}
   POLICIES_PATH: /app/policies.yaml
 
@@ -33,6 +37,18 @@ x-backend-env: &backend-env
   ANALYTICS_TIMEOUT_SECONDS: ${ANALYTICS_TIMEOUT_SECONDS:-2}
 
   # ---- slice J (scale-out) backend env: add directly below this line ----
+
+  # Background scrubber (improvements.md): re-verifies stored files on its own, so damage is
+  # found before anyone asks. Tunable without code changes; see .env.example.
+  SCRUB_ENABLED: ${SCRUB_ENABLED:-true}
+  SCRUB_INTERVAL_SECONDS: ${SCRUB_INTERVAL_SECONDS:-30}
+  SCRUB_BATCH: ${SCRUB_BATCH:-5}
+  SCRUB_RECHECK_SECONDS: ${SCRUB_RECHECK_SECONDS:-3600}
+  SCRUB_MAX_BYTES: ${SCRUB_MAX_BYTES:-67108864}
+  # Chaos console (improvements.md 2.1): OFF in a default install. Admin only, audited, faults expire.
+  CHAOS_ENABLED: ${CHAOS_ENABLED:-false}
+  CHAOS_MAX_SECONDS: ${CHAOS_MAX_SECONDS:-600}
+  CHAOS_DEFAULT_SECONDS: ${CHAOS_DEFAULT_SECONDS:-60}
 
 services:
   nginx:

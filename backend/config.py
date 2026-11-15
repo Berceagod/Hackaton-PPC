@@ -11,6 +11,19 @@ def _req(name: str) -> str:
     return value
 
 
+def _build_users() -> dict:
+    users = {
+        "dispecer@ppc.ro": {"password": _req("DISPECER_PASSWORD"), "role": "dispecer",
+                            "name": "Dispecer Muntenia"},
+        "admin@ppc.ro": {"password": _req("ADMIN_PASSWORD"), "role": "admin",
+                         "name": "Admin FileGrid"},
+    }
+    auditor = os.environ.get("AUDITOR_PASSWORD", "").strip()
+    if auditor:  # optional: reads audit trails, never file content (improvements.md 2.5)
+        users["auditor@ppc.ro"] = {"password": auditor, "role": "auditor", "name": "Auditor"}
+    return users
+
+
 def parse_master_key(value: str) -> bytes:
     """FILEGRID_MASTER_KEY: 64 hex characters = the 32-byte AES-256 master key (ADR-0011)."""
     try:
@@ -63,6 +76,27 @@ class Settings:
 
     # ---- slice J (scale-out) settings (always with a default): add directly below this line ----
 
+    # background scrubber (improvements.md 2.2): re-verify stored files on its own
+    scrub_enabled: bool = True
+    scrub_interval_seconds: float = 30.0     # pause between batches
+    scrub_batch: int = 5                     # files checked per batch, per worker
+    scrub_recheck_seconds: float = 3600.0    # a file is re-checked at most this often
+    scrub_max_bytes: int = 64 * 1024 * 1024  # bigger files are skipped by the background job
+    scrub_categories: tuple = ("outage_records", "connection_docs", "drone_videos")
+    # login lockout with backoff (improvements.md 2.5): after N consecutive failures an account
+    # is refused for base * 2^(failures-N) seconds, at most `max`
+    login_max_failures: int = 5
+    login_lock_base_seconds: float = 30.0
+    login_lock_max_seconds: float = 900.0
+    # storage canary (improvements.md 2.8): a tiny synthetic round trip on every storage
+    canary_enabled: bool = True
+    canary_interval_seconds: float = 60.0
+    # chaos console (improvements.md 2.1): OFF unless explicitly enabled; admin only, audited
+    chaos_enabled: bool = False
+    chaos_max_seconds: float = 600.0         # every fault expires by itself, at most this long
+    chaos_default_seconds: float = 60.0
+    toxiproxy_url: str = "http://toxiproxy:8474"
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -105,16 +139,24 @@ class Settings:
             analytics_timeout_seconds=float(os.environ.get("ANALYTICS_TIMEOUT_SECONDS", "2")),
 
             # ---- slice J (scale-out) from_env lines: add directly below this line ----
-            users={
-                "dispecer@ppc.ro": {
-                    "password": _req("DISPECER_PASSWORD"),
-                    "role": "dispecer",
-                    "name": "Dispecer Muntenia",
-                },
-                "admin@ppc.ro": {
-                    "password": _req("ADMIN_PASSWORD"),
-                    "role": "admin",
-                    "name": "Admin FileGrid",
-                },
-            },
+            scrub_enabled=os.environ.get("SCRUB_ENABLED", "true").strip().lower() not in ("0", "false", "no"),
+            scrub_interval_seconds=float(os.environ.get("SCRUB_INTERVAL_SECONDS", "30")),
+            scrub_batch=int(os.environ.get("SCRUB_BATCH", "5")),
+            scrub_recheck_seconds=float(os.environ.get("SCRUB_RECHECK_SECONDS", "3600")),
+            scrub_max_bytes=int(os.environ.get("SCRUB_MAX_BYTES", str(64 * 1024 * 1024))),
+            login_max_failures=int(os.environ.get("LOGIN_MAX_FAILURES", "5")),
+            login_lock_base_seconds=float(os.environ.get("LOGIN_LOCK_BASE_SECONDS", "30")),
+            login_lock_max_seconds=float(os.environ.get("LOGIN_LOCK_MAX_SECONDS", "900")),
+            canary_enabled=os.environ.get("CANARY_ENABLED", "true").strip().lower() not in ("0", "false", "no"),
+            canary_interval_seconds=float(os.environ.get("CANARY_INTERVAL_SECONDS", "60")),
+            chaos_enabled=os.environ.get("CHAOS_ENABLED", "false").strip().lower() in ("1", "true", "yes"),
+            chaos_max_seconds=float(os.environ.get("CHAOS_MAX_SECONDS", "600")),
+            chaos_default_seconds=float(os.environ.get("CHAOS_DEFAULT_SECONDS", "60")),
+            toxiproxy_url=os.environ.get("TOXIPROXY_URL", "http://toxiproxy:8474"),
+            scrub_categories=tuple(
+                c.strip() for c in os.environ.get(
+                    "SCRUB_CATEGORIES", "outage_records,connection_docs,drone_videos"
+                ).split(",") if c.strip()
+            ),
+            users=_build_users(),
         )

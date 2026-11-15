@@ -37,6 +37,7 @@ If time is short, do 1, 2 and 3 first, then the UI, then 4.
 ## 2. Features that make the demo memorable
 
 ### 2.1 Chaos console and live topology (the "watch it survive" screen): ★★★ / M
+> **Status (branch `feat/improvements`):** ✅ backend chaos console: simulated storage down/slow, network degradation via toxiproxy, self-expiring faults, panic button, admin-only, audited, off unless `CHAOS_ENABLED=true` (ADR-0036, `scripts/demo/chaos.sh`). ⏳ the console screen and live topology view are built in the UI remake (see section 4 status).
 An admin-only page: a diagram of nginx, backend replicas, postgres-blob, S3, FTP and the outbox, drawn live from Prometheus, with buttons:
 **Kill FTP · Corrupt a byte in S3 · Bad network (latency and loss) · 10x storm on outage records · Add a backend replica.**
 Each button calls a guarded endpoint or a small sidecar. The diagram edges turn amber or red, breakers open, the outbox counter climbs, the other categories' latency stays flat, then everything recovers.
@@ -44,6 +45,7 @@ Each button calls a guarded endpoint or a small sidecar. The diagram edges turn 
 - Guard it: only when `CHAOS_ENABLED=true`, only for `admin`, every use audited. Never on in a default install.
 
 ### 2.2 Self-healing: replicas and a scrubber: ★★★ / M
+> **Status (branch `feat/improvements`):** ✅ background scrubber with detection, audit entry, metric and alert (ADR-0034, `scripts/demo/scrubber.sh`). ✅ `replicas` (0 or 1, optional `replica_storage`) in the policy, repair on download (`X-Repaired`) and by the scrubber, serving the copy when the primary's storage is down (`X-Served-From`), alerts `FileRepaired` (info) and `RepairFailed` (critical), `scripts/demo/self-heal.sh` (ADR-0035). One copy, not two; off by default (the doubling of writes is the cost).
 - Policy gets `replicas: 1` or `2`, with the second copy on a *different* storage (for example S3 primary, Postgres secondary).
 - A background **scrubber** re-verifies files at a set rate (metrics `filegrid_scrub_files_total`, `filegrid_repairs_total`). On a mismatch it copies the good replica over the bad one and writes an audit entry `repaired`.
 - Downloading a corrupt primary transparently serves the good replica, still with `X-Integrity-Verified: true` plus `X-Repaired: true`.
@@ -51,6 +53,7 @@ Each button calls a guarded endpoint or a small sidecar. The diagram edges turn 
 - Watch the cost: replicas double the write cost. Record it in an ADR and make it per category (videos: 1 copy; outage records: 2).
 
 ### 2.3 The file's journey and a signed receipt: ★★★ / M
+> **Status (branch `feat/improvements`):** ✅ signed Ed25519 receipt + public verify (ADR-0033, `scripts/demo/receipt.sh`). ✅ tamper-evident audit hash chain (ADR-0032, `scripts/demo/audit-tamper.sh`). ⏳ NOT done: journey-view UI (needs the frontend remake). Receipts are JSON only (no PDF).
 - **Journey view** on the Files page: click a file and see a vertical timeline built from its trace id: received at gateway (+0 ms), authenticated, hashed, written to S3 (130 ms), metadata committed, acknowledged, then later downloads and verifications. The data already exists (trace spans in Loki, audit table); this is a UI over it.
 - **Integrity receipt**: a downloadable JSON or PDF with SHA-256, size, storage, timestamps and trace id, **signed** (Ed25519 key in `.env`), plus a public `GET /verify-receipt` page. "FileGrid can *prove* it" becomes a document a client keeps.
 - **Tamper-evident audit log**: each `audit_logs` row stores a `prev_hash`; `GET /audit/verify` recomputes the chain. Edit one row by hand in the database and verification fails. Today the audit is a plain table, so anyone with database access can rewrite history, which weakens "auditable".
@@ -63,6 +66,7 @@ Each button calls a guarded endpoint or a small sidecar. The diagram edges turn 
 - **Recommender**: slice I's benchmark gives a verdict per category; add a button "apply recommended policy". This closes the loop from statistics to decision, which is what brief section 5 asks for.
 
 ### 2.5 Security beyond the checklist: ★★ / M
+> **Status (branch `feat/improvements`):** ✅ per-file random keys wrapped by the master key, ✅ crypto-shredding erasure (`POST /files/{id}/erase`, `scripts/demo/erase-document.sh`), ✅ master-key rotation without re-encrypting files (`keystore.rewrap_all`, as a function), ✅ `auditor` role, ✅ login lockout with backoff (ADR-0038). ⏳ NOT done: per-meter credentials, ClamAV, signed download links, TOTP, the threat-model page.
 - **Per-meter credentials** (mTLS with device certificates, or per-meter HMAC keys), so one leaked secret cannot impersonate every meter and one meter can be revoked. Today the simulator uses one shared token: least-privilege `service` role, but still shared.
 - **Crypto-shredding for erasure**: today each file's key is derived from the file id and the master key. Use a **random per-file key wrapped by the master key** instead. Erasing a person's document then means deleting its wrapped key, which makes the ciphertext unreadable everywhere, including backups. It also allows **master-key rotation** without re-encrypting files. Proof: `scripts/demo/erase-document.sh`.
 - **Upload hygiene**: ClamAV scanning for `connection_docs` and drone videos, strict content-type sniffing, size limits per category.
@@ -86,6 +90,7 @@ Slice I builds the summary endpoint. These make it useful to a decision-maker:
 - **Autoscaling on a real signal** (slice J): scale on queue depth or p95 rather than CPU only, and show the replicas moving during a storm.
 
 ### 2.8 Observability polish: ★★ / S to M
+> **Status (branch `feat/improvements`):** ✅ storage canary + alert, ✅ SLO burn alert for outage records, ✅ a runbook link on all 21 alerts and `docs/runbooks/*.md`, ✅ dashboard row for self-healing/canary (ADR-0037). ⏳ NOT done: remaining-error-budget panel, a real Slack/Telegram receiver (needs a token that must not be in git), public status page.
 - **SLOs and error budgets** per guarantee (for example "outage records saved in under 2 s, 99.5 %"), with burn-rate alerts and one stat per SLO on the dashboard.
 - **Synthetic canary**: upload, download and verify a tiny file every minute; alert if it fails. It catches what metrics cannot.
 - **Runbook link in every alert** (`annotations.runbook`) pointing at a short `docs/runbooks/*.md`: what to check, in order.
@@ -93,6 +98,7 @@ Slice I builds the summary endpoint. These make it useful to a decision-maker:
 - A **public read-only status page** generated from the same Prometheus data.
 
 ### 2.9 Operations and developer experience: ★★ / S
+> **Status (branch `feat/improvements`):** ✅ `scripts/demo/run-all.sh` (plan listing, `--only/--skip/--heavy`, pass/fail summary), ✅ Grafana URL and password in the start message. ⏳ NOT done: demo seed, pre-built MinIO image, trusted TLS, committed load-test report.
 - **`scripts/demo/run-all.sh`**: the full scripted presentation with narration and pauses, in the order of the PDF checklist. A rehearsed demo is a stronger demo.
 - **Demo seed**: realistic synthetic data in the UI from the first second.
 - **Pre-built images**: MinIO is currently built from source on first start (about 2 minutes, and it depends on an upstream repository staying available). Publish our own image, or use an S3 server that still ships images (the notes name SeaweedFS as the fallback). A clean-machine start in about 2 minutes is a selling point.
