@@ -19,6 +19,7 @@ import uuid
 
 import metrics
 from storage.base import StorageError
+from testing import is_quiet
 
 log = logging.getLogger("filegrid.canary")
 PAYLOAD_BYTES = 2048
@@ -67,7 +68,8 @@ async def run_canary(deps, stop: asyncio.Event) -> None:
         return
     while not stop.is_set():
         try:
-            await canary_once(deps)
+            if not await is_quiet(deps):  # paused by the Testing overlay's "Liniște" switch
+                await canary_once(deps)
         except Exception:
             log.exception("canary pass failed")
         try:

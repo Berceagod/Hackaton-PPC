@@ -55,6 +55,8 @@ class FakeRepo:
         self.scrub: dict[str, dict] = {}  # file_id -> {verified_at, status}
         self.faults: dict[str, dict] = {}   # chaos faults
         self.file_keys: dict[str, dict] = {}  # per-file wrapped keys
+        self.testing: dict[str, tuple] = {}   # testing overlay state
+        self.leases: dict[str, tuple] = {}
         self.logins: dict[str, dict] = {}     # failed-login counters
         self.replicas: dict[str, dict] = {}  # file_id -> {storage, storage_key, status}
         self.readings: dict[tuple, dict] = {}
@@ -180,6 +182,26 @@ class FakeRepo:
             st.update(verified_at=None, status=None)
         else:
             st.update(verified_at=time.time(), status=status)
+
+    # ---- testing overlay state (mirrors PostgresRepo) ----
+    async def set_testing(self, key, value, duration):
+        self.testing[key] = (dict(value), time.time() + duration)
+
+    async def get_testing(self, key):
+        row = self.testing.get(key)
+        if not row or row[1] <= time.time():
+            return None
+        return {**row[0], "_remaining": round(row[1] - time.time(), 1)}
+
+    async def clear_testing(self, key):
+        self.testing.pop(key, None)
+
+    async def try_lease(self, name, holder, seconds):
+        cur = self.leases.get(name)
+        if cur and cur[1] > time.time() and cur[0] != holder:
+            return False
+        self.leases[name] = (holder, time.time() + seconds)
+        return True
 
     # ---- per-file keys and login attempts (mirror PostgresRepo) ----
     async def put_file_key(self, file_id, wrapped):

@@ -31,6 +31,8 @@ from routes.analytics import router as analytics_router
 # ---- slice J (scale-out) imports: add directly below this line ----
 from routes.trust import router as trust_router
 from routes.chaos import router as chaos_router
+from routes.testing import router as testing_router
+from testing import run_generator
 from chaos import run_reaper
 from canary import run_canary
 from storage.chaos import ChaosStorage
@@ -127,6 +129,7 @@ def create_app(deps: Deps | None = None) -> FastAPI:
             tasks.append(asyncio.create_task(run_scrubber(app.state.deps, stop)))
             tasks.append(asyncio.create_task(run_reaper(app.state.deps, stop)))  # no-op unless CHAOS_ENABLED
             tasks.append(asyncio.create_task(run_canary(app.state.deps, stop)))
+            tasks.append(asyncio.create_task(run_generator(app.state.deps, stop)))  # no-op unless TESTING_ENABLED
         log.info("backend ready")
         yield
         stop.set()
@@ -162,6 +165,7 @@ def create_app(deps: Deps | None = None) -> FastAPI:
         # ---- slice J (scale-out) routers under /api/v1: add directly below this line ----
         app.include_router(trust_router, prefix=prefix)  # audit chain, receipts, scrubber
         app.include_router(chaos_router, prefix=prefix)  # chaos console (403 unless CHAOS_ENABLED)
+        app.include_router(testing_router, prefix=prefix)  # testing overlay (403 unless TESTING_ENABLED) + /analytics/live
     return app
 
 

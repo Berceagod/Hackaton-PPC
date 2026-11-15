@@ -136,6 +136,19 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_login_attempts_last ON login_attempts (last_failure);
 
+-- testing overlay: small shared key/value state (generator on/off, running job) and a lease so
+-- only one worker generates traffic
+CREATE TABLE IF NOT EXISTS testing_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT        NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS testing_lease (
+    name       TEXT PRIMARY KEY,
+    holder     TEXT        NOT NULL,
+    until      TIMESTAMPTZ NOT NULL
+);
+
 -- chaos console (improvements.md 2.1): injected faults, shared by every replica, self-expiring
 CREATE TABLE IF NOT EXISTS chaos_faults (
     target     TEXT PRIMARY KEY,            -- s3 | ftp | postgres | network
@@ -255,6 +268,10 @@ class Repo(Protocol):
     async def set_replica(self, file_id: str, storage: str, storage_key: str, status: str) -> None: ...
     async def get_replica(self, file_id: str) -> dict | None: ...
     async def replica_stats(self) -> dict: ...
+    async def set_testing(self, key: str, value: dict, duration: float) -> None: ...
+    async def get_testing(self, key: str) -> dict | None: ...
+    async def clear_testing(self, key: str) -> None: ...
+    async def try_lease(self, name: str, holder: str, seconds: float) -> bool: ...
     async def put_file_key(self, file_id: str, wrapped: bytes) -> None: ...
     async def get_file_key(self, file_id: str) -> dict | None: ...
     async def erase_file_key(self, file_id: str, by: str) -> bool: ...
@@ -1048,3 +1065,36 @@ class PostgresRepo:
     async def login_ok(self, email) -> None:
         async with self._pool.acquire() as con:
             await con.execute("DELETE FROM login_attempts WHERE email = $1", email)
+
+    # ---- testing overlay state ----
+    async def set_testing(self, key, value, duration) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute(
+                "INSERT INTO testing_state (key, value, expires_at) "
+                "VALUES ($1,$2, now() + make_interval(secs => $3)) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at",
+                key, json.dumps(value), float(duration))
+
+    async def get_testing(self, key) -> dict | None:
+        async with self._pool.acquire() as con:
+            row = await con.fetchrow(
+                "SELECT value, extract(epoch FROM (expires_at - now())) AS left "
+                "FROM testing_state WHERE key = $1 AND expires_at > now()", key)
+        if not row:
+            return None
+        return {**json.loads(row["value"]), "_remaining": round(float(row["left"]), 1)}
+
+    async def clear_testing(self, key) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute("DELETE FROM testing_state WHERE key = $1", key)
+
+    async def try_lease(self, name, holder, seconds) -> bool:
+        """True when this holder owns the lease for the next `seconds` (one worker at a time)."""
+        async with self._pool.acquire() as con:
+            row = await con.fetchrow(
+                "INSERT INTO testing_lease (name, holder, until) "
+                "VALUES ($1,$2, now() + make_interval(secs => $3)) "
+                "ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, until = EXCLUDED.until "
+                "WHERE testing_lease.until < now() OR testing_lease.holder = EXCLUDED.holder "
+                "RETURNING holder", name, holder, float(seconds))
+        return row is not None

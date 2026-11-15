@@ -7,6 +7,11 @@ Usage: show_summary.py summary.json [benchmark|normal|peak]
 import json
 import sys
 
+# The verdicts contain Romanian letters; a Windows console (cp1252) cannot print them and the
+# script used to crash AFTER the measurements were already stored.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 CATEGORIES = ("meter_readings", "outage_records", "connection_docs", "drone_videos")
 
 

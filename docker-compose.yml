@@ -47,6 +47,8 @@ x-backend-env: &backend-env
   SCRUB_MAX_BYTES: ${SCRUB_MAX_BYTES:-67108864}
   # Chaos console (improvements.md 2.1): OFF in a default install. Admin only, audited, faults expire.
   CHAOS_ENABLED: ${CHAOS_ENABLED:-false}
+  # Testing overlay (admin only): synthetic traffic and one-press demo runs. OFF in a default install.
+  TESTING_ENABLED: ${TESTING_ENABLED:-false}
   CHAOS_MAX_SECONDS: ${CHAOS_MAX_SECONDS:-600}
   CHAOS_DEFAULT_SECONDS: ${CHAOS_DEFAULT_SECONDS:-60}
 
