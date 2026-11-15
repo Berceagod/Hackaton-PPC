@@ -30,7 +30,7 @@ GENERATOR_CATEGORIES = ("outage_records", "connection_docs", "drone_videos")
 MAX_RATE = 5.0           # synthetic files per second, per category
 MAX_DURATION = 1800.0    # a generator run ends by itself after at most 30 minutes
 WORKER_ID = f"{os.getpid()}-{uuid.uuid4().hex[:6]}"
-REGIONS = ("Muntenia", "Banat", "Dobrogea")
+REGIONS = analytics.ZONES
 _tasks: set = set()      # strong references to running jobs
 
 JOBS = {

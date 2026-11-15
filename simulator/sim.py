@@ -132,12 +132,19 @@ M_DUPLICATES = Counter("sim_duplicates_sent_total", "Citiri retrimise intentiona
 # Flota de contoare
 # --------------------------------------------------------------------------- #
 
+# Județ -> prefix used in meter ids. Equal weight across all 41 counties.
 ZONES = {
-    "Muntenia": "MUN",
-    "Banat": "BAN",
-    "Dobrogea": "DOB",
+    "Alba": "AB", "Arad": "AR", "Argeș": "AG", "Bacău": "BC", "Bihor": "BH",
+    "Bistrița-Năsăud": "BN", "Botoșani": "BT", "Brașov": "BV", "Brăila": "BR",
+    "Buzău": "BZ", "Caraș-Severin": "CS", "Călărași": "CL", "Cluj": "CJ",
+    "Constanța": "CT", "Covasna": "CV", "Dâmbovița": "DB", "Dolj": "DJ",
+    "Galați": "GL", "Giurgiu": "GR", "Gorj": "GJ", "Harghita": "HR",
+    "Hunedoara": "HD", "Ialomița": "IL", "Iași": "IS", "Ilfov": "IF",
+    "Maramureș": "MM", "Mehedinți": "MH", "Mureș": "MS", "Neamț": "NT",
+    "Olt": "OT", "Prahova": "PH", "Satu Mare": "SM", "Sălaj": "SJ", "Sibiu": "SB",
+    "Suceava": "SV", "Teleorman": "TR", "Timiș": "TM", "Tulcea": "TL",
+    "Vaslui": "VS", "Vâlcea": "VL", "Vrancea": "VN",
 }
-ZONE_WEIGHTS = [0.5, 0.25, 0.25]
 SUBSTATIONS_PER_ZONE = 12
 
 # putere medie (kW) per tip de consumator
@@ -174,7 +181,7 @@ def build_fleet(rng: random.Random, count: int) -> list[Meter]:
     zone_names = list(ZONES)
     type_names = list(METER_TYPES)
     for i in range(count):
-        zone = rng.choices(zone_names, ZONE_WEIGHTS)[0]
+        zone = rng.choice(zone_names)
         prefix = ZONES[zone]
         mtype = rng.choices(type_names, METER_TYPE_WEIGHTS)[0]
         lo, hi = METER_TYPES[mtype]

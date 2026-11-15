@@ -18,8 +18,8 @@ import {
   Plane,
 } from 'lucide-react'
 import { getAnalyticsSummary } from '../services/api'
-import type { AnalyticsSummary } from '../types/filegrid'
-import { CATEGORY_LABELS } from '../types/filegrid'
+import type { AnalyticsSummary, ZoneInsight } from '../types/filegrid'
+import { CATEGORY_LABELS, ZONE_OPTIONS } from '../types/filegrid'
 import { StorageBadge } from '../components/StorageBadge'
 import { LiveStorageLatency } from '../components/LiveStorageLatency'
 import type { ToastMessage } from '../components/Toast'
@@ -32,6 +32,7 @@ export function AnalyticsPage({ pushToast }: AnalyticsPageProps) {
   const [data, setData] = useState<AnalyticsSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [county, setCounty] = useState<string>('Prahova')
 
   const load = useCallback(() => {
     setLoading(true)
@@ -222,70 +223,90 @@ export function AnalyticsPage({ pushToast }: AnalyticsPageProps) {
         <h3 className="text-sm font-semibold uppercase tracking-wider text-grid-cyan">
           Secțiunea C — Insights din Rețeaua Electrică
         </h3>
-        <div className="grid gap-4 md:grid-cols-3">
-          {data.zone_insights.map((z) => (
-            <div
-              key={z.zone}
-              className="rounded-xl border border-grid-border bg-grid-surface p-5"
-            >
-              <div className="mb-4 flex items-center gap-2">
-                <MapPin className="h-4 w-4 text-grid-cyan" />
-                <h4 className="font-semibold text-grid-text">{z.zone}</h4>
-              </div>
-              <ul className="space-y-3 text-sm">
-                <li className="flex items-center justify-between">
-                  <span className="flex items-center gap-1.5 text-grid-muted">
-                    <AlertTriangle className="h-3.5 w-3.5 text-grid-amber" />
-                    Avarii raportate
-                  </span>
-                  <span className="font-mono font-semibold text-grid-text">
-                    {z.outages_reported}
-                  </span>
-                </li>
-                <li className="flex items-center justify-between">
-                  <span className="flex items-center gap-1.5 text-grid-muted">
-                    <Activity className="h-3.5 w-3.5 text-grid-red" />
-                    Anomalii contoare
-                  </span>
-                  <span className="font-mono font-semibold text-grid-text">
-                    {z.meter_anomalies}
-                  </span>
-                </li>
-                <li className="flex items-center justify-between">
-                  <span className="flex items-center gap-1.5 text-grid-muted">
-                    <Plane className="h-3.5 w-3.5 text-grid-cyan" />
-                    Inspecții dronă
-                  </span>
-                  <span className="font-mono font-semibold text-grid-text">
-                    {z.drone_inspections}
-                  </span>
-                </li>
-              </ul>
-              <div className="mt-4 border-t border-grid-border pt-3">
-                <span
-                  className={`inline-flex rounded border px-2 py-0.5 text-[11px] font-medium ${
-                    z.drone_status === 'completed'
-                      ? 'border-grid-green/30 bg-grid-green/10 text-grid-green'
-                      : z.drone_status === 'in_progress'
-                        ? 'border-grid-amber/30 bg-grid-amber/10 text-grid-amber'
-                        : 'border-grid-border text-grid-muted'
-                  }`}
-                >
-                  Status dronă: {statusLabel(z.drone_status)}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
+        <label className="flex max-w-xs flex-col gap-1 text-xs font-medium uppercase tracking-wider text-grid-muted">
+          Județ
+          <select
+            value={county}
+            onChange={(e) => setCounty(e.target.value)}
+            className="rounded-lg border border-grid-border bg-grid-bg px-3 py-2 text-sm normal-case tracking-normal text-grid-text outline-none focus:ring-2 focus:ring-grid-blue"
+          >
+            {ZONE_OPTIONS.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <CountyCard insight={insightFor(data.zone_insights, county)} />
         <p className="text-xs text-grid-muted">
-          Top zone după avarii:{' '}
+          Top județe după avarii:{' '}
           {[...data.zone_insights]
             .sort((a, b) => b.outages_reported - a.outages_reported)
+            .slice(0, 5)
             .map((z) => `${z.zone} (${z.outages_reported})`)
             .join(' → ')}
           .{data.narrative.network ? ` ${data.narrative.network}` : ''}
         </p>
       </section>
+    </div>
+  )
+}
+
+function insightFor(insights: ZoneInsight[], county: string): ZoneInsight {
+  return (
+    insights.find((z) => z.zone === county) ?? {
+      zone: county as ZoneInsight['zone'],
+      outages_reported: 0,
+      meter_anomalies: 0,
+      drone_inspections: 0,
+      drone_status: 'pending',
+    }
+  )
+}
+
+function CountyCard({ insight }: { insight: ZoneInsight }) {
+  return (
+    <div className="max-w-md rounded-xl border border-grid-border bg-grid-surface p-5">
+      <div className="mb-4 flex items-center gap-2">
+        <MapPin className="h-4 w-4 text-grid-cyan" />
+        <h4 className="font-semibold text-grid-text">{insight.zone}</h4>
+      </div>
+      <ul className="space-y-3 text-sm">
+        <li className="flex items-center justify-between">
+          <span className="flex items-center gap-1.5 text-grid-muted">
+            <AlertTriangle className="h-3.5 w-3.5 text-grid-amber" />
+            Avarii raportate
+          </span>
+          <span className="font-mono font-semibold text-grid-text">{insight.outages_reported}</span>
+        </li>
+        <li className="flex items-center justify-between">
+          <span className="flex items-center gap-1.5 text-grid-muted">
+            <Activity className="h-3.5 w-3.5 text-grid-red" />
+            Anomalii contoare
+          </span>
+          <span className="font-mono font-semibold text-grid-text">{insight.meter_anomalies}</span>
+        </li>
+        <li className="flex items-center justify-between">
+          <span className="flex items-center gap-1.5 text-grid-muted">
+            <Plane className="h-3.5 w-3.5 text-grid-cyan" />
+            Inspecții dronă
+          </span>
+          <span className="font-mono font-semibold text-grid-text">{insight.drone_inspections}</span>
+        </li>
+      </ul>
+      <div className="mt-4 border-t border-grid-border pt-3">
+        <span
+          className={`inline-flex rounded border px-2 py-0.5 text-[11px] font-medium ${
+            insight.drone_status === 'completed'
+              ? 'border-grid-green/30 bg-grid-green/10 text-grid-green'
+              : insight.drone_status === 'in_progress'
+                ? 'border-grid-amber/30 bg-grid-amber/10 text-grid-amber'
+                : 'border-grid-border text-grid-muted'
+          }`}
+        >
+          Status dronă: {statusLabel(insight.drone_status)}
+        </span>
+      </div>
     </div>
   )
 }

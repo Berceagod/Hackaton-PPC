@@ -8,7 +8,16 @@ export type StorageBackend = 'postgres' | 's3' | 'ftp'
 
 export type QueuePriority = 'high' | 'normal' | 'low'
 
-export type Zone = 'Muntenia' | 'Banat' | 'Dobrogea'
+export const COUNTIES = [
+  'Alba', 'Arad', 'Argeș', 'Bacău', 'Bihor', 'Bistrița-Năsăud', 'Botoșani',
+  'Brașov', 'Brăila', 'Buzău', 'Caraș-Severin', 'Călărași', 'Cluj', 'Constanța',
+  'Covasna', 'Dâmbovița', 'Dolj', 'Galați', 'Giurgiu', 'Gorj', 'Harghita',
+  'Hunedoara', 'Ialomița', 'Iași', 'Ilfov', 'Maramureș', 'Mehedinți', 'Mureș',
+  'Neamț', 'Olt', 'Prahova', 'Satu Mare', 'Sălaj', 'Sibiu', 'Suceava',
+  'Teleorman', 'Timiș', 'Tulcea', 'Vaslui', 'Vâlcea', 'Vrancea',
+] as const
+
+export type Zone = (typeof COUNTIES)[number]
 
 export interface FileMetadata {
   zone?: Zone | string
@@ -156,7 +165,7 @@ export const STORAGE_LABELS: Record<StorageBackend, string> = {
   ftp: 'FTP',
 }
 
-export const ZONE_OPTIONS: Zone[] = ['Muntenia', 'Banat', 'Dobrogea']
+export const ZONE_OPTIONS: Zone[] = [...COUNTIES]
 
 export const CHUNK_SIZE = 5 * 1024 * 1024 // 5 MB
 export const CHUNK_THRESHOLD = 5 * 1024 * 1024 // use chunked upload above 5 MB

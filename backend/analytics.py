@@ -27,7 +27,15 @@ from policies import CATEGORIES, STORAGES
 
 log = logging.getLogger("filegrid.analytics")
 
-ZONES = ("Muntenia", "Banat", "Dobrogea")
+# The 41 județe, Romanian alphabetical order. The API field stays `zone`.
+ZONES = (
+    "Alba", "Arad", "Argeș", "Bacău", "Bihor", "Bistrița-Năsăud", "Botoșani",
+    "Brașov", "Brăila", "Buzău", "Caraș-Severin", "Călărași", "Cluj", "Constanța",
+    "Covasna", "Dâmbovița", "Dolj", "Galați", "Giurgiu", "Gorj", "Harghita",
+    "Hunedoara", "Ialomița", "Iași", "Ilfov", "Maramureș", "Mehedinți", "Mureș",
+    "Neamț", "Olt", "Prahova", "Satu Mare", "Sălaj", "Sibiu", "Suceava",
+    "Teleorman", "Timiș", "Tulcea", "Vaslui", "Vâlcea", "Vrancea",
+)
 ANOMALY_LABELS = ("voltage_sag", "overvoltage", "load_spike", "tamper", "outage")
 LOAD_LABELS = (("normal", "Zi normală"), ("peak", "Vârf furtună (10x)"))
 

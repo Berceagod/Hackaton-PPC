@@ -6,6 +6,10 @@ Usage: show_summary.py summary.json [benchmark|normal|peak]
 
 import json
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
+from analytics import ZONES  # noqa: E402
 
 # The verdicts contain Romanian letters; a Windows console (cp1252) cannot print them and the
 # script used to crash AFTER the measurements were already stored.
@@ -23,8 +27,8 @@ def main(argv):
     narrative = doc.get("narrative") or {}
     if [row.get("category") for row in matrix] != list(CATEGORIES):
         return "storage_matrix is missing a category"
-    if [zone.get("zone") for zone in zones] != ["Muntenia", "Banat", "Dobrogea"]:
-        return "zone_insights must be Muntenia, Banat, Dobrogea"
+    if [zone.get("zone") for zone in zones] != list(ZONES):
+        return "zone_insights must list every Romanian county"
     for key in ("storage_verdict", "storm_isolation", "network"):
         if not narrative.get(key):
             return f"narrative.{key} is empty"

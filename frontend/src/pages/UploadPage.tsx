@@ -165,7 +165,7 @@ export function UploadPage({ pushToast }: UploadPageProps) {
       <div className="grid gap-4 rounded-xl border border-grid-border bg-grid-surface p-5 md:grid-cols-3">
         <div>
           <label className="mb-1 block text-xs font-medium uppercase tracking-wider text-grid-muted">
-            Zona
+            Județ
           </label>
           <select
             value={zone}

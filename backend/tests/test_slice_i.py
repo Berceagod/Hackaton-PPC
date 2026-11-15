@@ -77,7 +77,7 @@ def test_empty_summary_is_200_and_names_the_benchmark(client, auth):
     assert [row["storage"] for row in body["storage_matrix"]] == ["postgres", "s3", "ftp", "s3"]
     assert all(row["latency_p95_ms"] == 0 for row in body["storage_matrix"])
     assert [point["label"] for point in body["load_comparison"]] == ["Zi normală", "Vârf furtună (10x)"]
-    assert [zone["zone"] for zone in body["zone_insights"]] == ["Muntenia", "Banat", "Dobrogea"]
+    assert [zone["zone"] for zone in body["zone_insights"]] == list(analytics.ZONES)
     assert "Nu există încă măsurători de latență." in body["narrative"]["storage_verdict"]
     assert "scripts/benchmark/run.sh" in body["narrative"]["storage_verdict"]
     assert "scripts/scenarios/normal-day.sh" in body["narrative"]["storm_isolation"]
@@ -264,55 +264,55 @@ def _upload(client, headers, category, zone, content=b"synthetic"):
 
 
 def test_zone_insights_detect_anomalies_and_compare_them_to_sim_label(client, auth, repo):
-    # Muntenia: five normal readings and one sag the simulator also labelled.
+    # Prahova: five normal readings and one sag the simulator also labelled.
     for n in range(5):
-        _send(client, auth, _reading("RO-AN-A", f"2026-11-14T10:00:0{n}.000Z", "Muntenia"))
+        _send(client, auth, _reading("RO-AN-A", f"2026-11-14T10:00:0{n}.000Z", "Prahova"))
     _send(client, auth, _reading(
-        "RO-AN-A", "2026-11-14T10:00:05.000Z", "Muntenia", voltage=188.4, label="voltage_sag",
+        "RO-AN-A", "2026-11-14T10:00:05.000Z", "Prahova", voltage=188.4, label="voltage_sag",
     ))
-    # Banat: the simulator says sag, the voltage does not. That is a miss, not an anomaly we count.
+    # Timiș: the simulator says sag, the voltage does not. That is a miss, not an anomaly we count.
     _send(client, auth, _reading(
-        "RO-AN-B", "2026-11-14T11:00:00.000Z", "Banat", voltage=230.0, label="voltage_sag",
+        "RO-AN-B", "2026-11-14T11:00:00.000Z", "Timiș", voltage=230.0, label="voltage_sag",
     ))
-    # Dobrogea: a real outage, and a load spike against that meter's own median.
+    # Constanța: a real outage, and a load spike against that meter's own median.
     _send(client, auth, _reading(
-        "RO-AN-C", "2026-11-14T12:00:00.000Z", "Dobrogea", voltage=0.0, power=0.0, label="outage",
+        "RO-AN-C", "2026-11-14T12:00:00.000Z", "Constanța", voltage=0.0, power=0.0, label="outage",
     ))
     for n in range(5):
-        _send(client, auth, _reading("RO-AN-D", f"2026-11-14T13:00:0{n}.000Z", "Dobrogea", power=1.0))
+        _send(client, auth, _reading("RO-AN-D", f"2026-11-14T13:00:0{n}.000Z", "Constanța", power=1.0))
     _send(client, auth, _reading(
-        "RO-AN-D", "2026-11-14T13:00:05.000Z", "Dobrogea", power=8.0, label="load_spike",
+        "RO-AN-D", "2026-11-14T13:00:05.000Z", "Constanța", power=8.0, label="load_spike",
     ))
     # A claim that was never stored must not show up as an anomaly.
     repo.readings[("RO-PEND", datetime(2026, 11, 14, tzinfo=timezone.utc))] = {
         "meter_id": "RO-PEND",
         "status": "pending",
-        "zone": "Muntenia",
+        "zone": "Prahova",
         "voltage_v": 0.0,
         "sim_label": "outage",
         "payload": "{}",
     }
 
-    _upload(client, auth, "outage_records", "Muntenia")
-    _upload(client, auth, "outage_records", "Muntenia", b"synthetic-2")
-    _upload(client, auth, "outage_records", "Dobrogea")
-    _upload(client, auth, "drone_videos", "Muntenia", b"drone-frame")
-    _upload(client, auth, "drone_videos", "Banat", b"drone-frame-2")
-    _upload(client, auth, "connection_docs", "Banat", b'{"titular":"Persoana Sintetica","cnp":"0000000000000"}')
+    _upload(client, auth, "outage_records", "Prahova")
+    _upload(client, auth, "outage_records", "Prahova", b"synthetic-2")
+    _upload(client, auth, "outage_records", "Constanța")
+    _upload(client, auth, "drone_videos", "Prahova", b"drone-frame")
+    _upload(client, auth, "drone_videos", "Timiș", b"drone-frame-2")
+    _upload(client, auth, "connection_docs", "Timiș", b'{"titular":"Persoana Sintetica","cnp":"0000000000000"}')
 
     body = _summary(client, auth)
     zones = {zone["zone"]: zone for zone in body["zone_insights"]}
-    assert zones["Muntenia"]["outages_reported"] == 2
-    assert zones["Muntenia"]["meter_anomalies"] == 1
-    assert zones["Muntenia"]["drone_inspections"] == 1
-    assert zones["Muntenia"]["drone_status"] == "in_progress"
-    assert zones["Banat"]["outages_reported"] == 0
-    assert zones["Banat"]["meter_anomalies"] == 0
-    assert zones["Banat"]["drone_status"] == "completed"
-    assert zones["Dobrogea"]["outages_reported"] == 1
-    assert zones["Dobrogea"]["meter_anomalies"] == 2
-    assert zones["Dobrogea"]["drone_inspections"] == 0
-    assert zones["Dobrogea"]["drone_status"] == "pending"
+    assert zones["Prahova"]["outages_reported"] == 2
+    assert zones["Prahova"]["meter_anomalies"] == 1
+    assert zones["Prahova"]["drone_inspections"] == 1
+    assert zones["Prahova"]["drone_status"] == "in_progress"
+    assert zones["Timiș"]["outages_reported"] == 0
+    assert zones["Timiș"]["meter_anomalies"] == 0
+    assert zones["Timiș"]["drone_status"] == "completed"
+    assert zones["Constanța"]["outages_reported"] == 1
+    assert zones["Constanța"]["meter_anomalies"] == 2
+    assert zones["Constanța"]["drone_inspections"] == 0
+    assert zones["Constanța"]["drone_status"] == "pending"
     assert "Audit: 1 eveniment pe documentele de racordare." in _matrix(body, "connection_docs")["verdict"]
     network = body["narrative"]["network"]
     assert "Detectorul a marcat 3 citiri anormale." in network

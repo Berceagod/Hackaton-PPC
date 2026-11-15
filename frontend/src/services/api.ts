@@ -13,11 +13,11 @@ import type {
   PoliciesMap,
   StorageBackend,
   UploadProgress,
-  Zone,
 } from '../types/filegrid'
 import {
   CHUNK_SIZE,
   CHUNK_THRESHOLD,
+  ZONE_OPTIONS,
 } from '../types/filegrid'
 
 const API_URL = import.meta.env.VITE_API_URL || '/api/v1'
@@ -209,7 +209,7 @@ function seedDemoFiles(): void {
       created_at: new Date(now - 3600_000).toISOString(),
       encrypted: false,
       trace_id: uuid(),
-      zone: 'Muntenia',
+      zone: 'Prahova',
       station: 'ST-Bucuresti-Nord',
       uploaded_by: 'simulator@ppc.ro',
       content_b64: utf8ToBase64(
@@ -226,7 +226,7 @@ function seedDemoFiles(): void {
       created_at: new Date(now - 7200_000).toISOString(),
       encrypted: false,
       trace_id: uuid(),
-      zone: 'Dobrogea',
+      zone: 'Constanța',
       station: 'ST-Constanta-Est',
       description: 'Întrerupere LEA 110kV — furtună',
       uploaded_by: 'dispecer@ppc.ro',
@@ -242,7 +242,7 @@ function seedDemoFiles(): void {
       created_at: new Date(now - 86400_000).toISOString(),
       encrypted: true,
       trace_id: uuid(),
-      zone: 'Banat',
+      zone: 'Timiș',
       station: 'Linie 20kV Timisoara',
       uploaded_by: 'admin@ppc.ro',
       content_b64: utf8ToBase64('Document racordare criptat AES-256-GCM'),
@@ -257,7 +257,7 @@ function seedDemoFiles(): void {
       created_at: new Date(now - 172800_000).toISOString(),
       encrypted: false,
       trace_id: uuid(),
-      zone: 'Muntenia',
+      zone: 'Prahova',
       station: 'LEA 20kV Ploiești',
       description: 'Inspecție coridor vegetație',
       uploaded_by: 'dispecer@ppc.ro',
@@ -893,29 +893,23 @@ export async function getAnalyticsSummary(): Promise<AnalyticsSummary> {
           drone_videos_ms: 245,
         },
       ],
-      zone_insights: [
-        {
-          zone: 'Muntenia' as Zone,
-          outages_reported: 47,
-          meter_anomalies: 12,
-          drone_inspections: 8,
-          drone_status: 'completed',
-        },
-        {
-          zone: 'Dobrogea' as Zone,
-          outages_reported: 31,
-          meter_anomalies: 5,
-          drone_inspections: 4,
-          drone_status: 'in_progress',
-        },
-        {
-          zone: 'Banat' as Zone,
-          outages_reported: 18,
-          meter_anomalies: 3,
-          drone_inspections: 6,
-          drone_status: 'pending',
-        },
-      ],
+      zone_insights: ZONE_OPTIONS.map((zone) => {
+        const demo: Record<string, { outages_reported: number; meter_anomalies: number; drone_inspections: number; drone_status: 'completed' | 'in_progress' | 'pending' }> = {
+          Prahova: { outages_reported: 47, meter_anomalies: 12, drone_inspections: 8, drone_status: 'completed' },
+          Constanța: { outages_reported: 31, meter_anomalies: 5, drone_inspections: 4, drone_status: 'in_progress' },
+          Timiș: { outages_reported: 18, meter_anomalies: 3, drone_inspections: 6, drone_status: 'pending' },
+        }
+        const sample = demo[zone]
+        return sample
+          ? { zone, ...sample }
+          : {
+              zone,
+              outages_reported: 0,
+              meter_anomalies: 0,
+              drone_inspections: 0,
+              drone_status: 'pending' as const,
+            }
+      }),
       narrative: {
         storage_verdict:
           'PostgreSQL este optim pentru citiri contoare (<50KB) datorită latenței p95 de 11ms și constrângerii de unicitate; S3 Multipart oferă throughput de 4.5x mai mare pentru video-uri dronă >100MB.',
