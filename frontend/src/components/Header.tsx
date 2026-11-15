@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { getHealth, USE_MOCK, type ApiHealth } from '../services/api'
+import { AlertBell } from './AlertBell'
 import type { AuthUser } from '../types/filegrid'
 
 export type AppTab = 'upload' | 'files' | 'policies' | 'analytics' | 'chaos'
@@ -68,6 +69,7 @@ export function Header({ user, activeTab, onTabChange, onLogout }: HeaderProps) 
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <AlertBell />
           <span
             className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium ${HEALTH_BADGE[health].className}`}
           >

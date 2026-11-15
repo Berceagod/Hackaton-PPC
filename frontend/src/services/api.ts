@@ -1005,6 +1005,36 @@ export async function clearChaos(): Promise<void> {
   await chaosCall('', 'DELETE')
 }
 
+// ─── In-app alerts (Prometheus alerts + the application's own, e.g. failover) ─────────────
+
+export interface AppAlert {
+  id: string
+  source: 'prometheus' | 'app'
+  severity: 'critical' | 'warning' | 'info' | string
+  title: string
+  detail: string
+  runbook?: string | null
+  category?: string | null
+  storage?: string | null
+  since?: string | null
+  state: 'firing' | 'pending' | 'resolved' | string
+}
+
+export interface AlertsResponse {
+  alerts: AppAlert[]
+  counts: { critical: number; warning: number; info: number }
+  prometheus_ok: boolean
+}
+
+export async function getAlerts(): Promise<AlertsResponse> {
+  if (USE_MOCK) {
+    return { alerts: [], counts: { critical: 0, warning: 0, info: 0 }, prometheus_ok: true }
+  }
+  const res = await apiFetch('/alerts')
+  if (!res.ok) throw new Error(`Alerte indisponibile: ${res.status}`)
+  return (await res.json()) as AlertsResponse
+}
+
 // ─── Testing overlay (admin only, off unless TESTING_ENABLED=true) + live storage latency ───
 
 export interface TestingStatus {
