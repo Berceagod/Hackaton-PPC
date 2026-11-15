@@ -29,6 +29,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
 import metrics
+import failover
 from crypto_envelope import encrypt_stream
 from repo import FileRecord
 from storage.base import StorageError
@@ -110,6 +111,12 @@ async def ingest_meter_reading(deps, file, idempotency_key, principal, trace_id)
     storage = deps.storages.get(policy.storage)
     if storage is None:
         raise HTTPException(501, f"Storage '{policy.storage}' not implemented")
+    # automatic failover: primary down, or the flux too big for it -> the fallback storage
+    chosen, why = failover.choose(deps, CATEGORY, policy)
+    if why:
+        storage = deps.storages[chosen]
+        metrics.failover_file(CATEGORY, why)
+    await failover.note(deps, CATEGORY, policy, chosen, why)
     metrics.note(storage=storage.name)
 
     repo = deps.meters()  # own connection pool (bulkhead, slice G)
@@ -146,14 +153,31 @@ async def ingest_meter_reading(deps, file, idempotency_key, principal, trace_id)
 
     key = reading_key(reading.meter_id, reading.reading_ts)
     filename = file.filename or f"{reading.meter_id}_{reading.reading_ts:%Y%m%dT%H%M%S}.json"
-    try:
+    async def write(target) -> None:
         # Encrypted under a key derived from file_id: a takeover that rewrites the same
         # object for the same file_id produces another valid ciphertext of the same bytes.
         body = (
             encrypt_stream(_one_chunk(raw), deps.settings.master_key, file_id)
             if policy.encryption else _one_chunk(raw)
         )
-        await storage.put_stream(key, body)
+        await target.put_stream(key, body)
+
+    try:
+        try:
+            await write(storage)
+        except StorageError as exc:
+            # a write to the primary just failed: try the fallback once before queuing
+            retry = failover.fallback_for_retry(deps, policy) if storage.name == policy.storage else None
+            if retry is None:
+                raise
+            log.warning("meter write failed on the primary; retrying on the fallback",
+                        extra={"category": CATEGORY, "storage": storage.name, "fallback": retry,
+                               "error": str(exc), **ident})
+            await write(deps.storages[retry])
+            storage = deps.storages[retry]
+            metrics.failover_file(CATEGORY, "storage_down")
+            await failover.note(deps, CATEGORY, policy, retry, "storage_down")
+            metrics.note(storage=storage.name)
     except StorageError as exc:
         log.error(
             "meter storage write failed",

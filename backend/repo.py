@@ -136,6 +136,23 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_login_attempts_last ON login_attempts (last_failure);
 
+-- policy extras: replicas (ADR-0035) and the automatic-failover storage were only held in memory
+-- and lost at the next refresh; persist them with the rest of the policy
+ALTER TABLE policies_config ADD COLUMN IF NOT EXISTS replicas          INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE policies_config ADD COLUMN IF NOT EXISTS replica_storage   TEXT;
+ALTER TABLE policies_config ADD COLUMN IF NOT EXISTS fallback_storage  TEXT;
+
+-- alerts raised by the application itself (failover started, ...), shown in the app's alert bell
+CREATE TABLE IF NOT EXISTS app_alerts (
+    key         TEXT PRIMARY KEY,
+    severity    TEXT        NOT NULL,
+    title       TEXT        NOT NULL,
+    detail      TEXT        NOT NULL,
+    category    TEXT,
+    raised_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ
+);
+
 -- testing overlay: small shared key/value state (generator on/off, running job) and a lease so
 -- only one worker generates traffic
 CREATE TABLE IF NOT EXISTS testing_state (
@@ -268,6 +285,9 @@ class Repo(Protocol):
     async def set_replica(self, file_id: str, storage: str, storage_key: str, status: str) -> None: ...
     async def get_replica(self, file_id: str) -> dict | None: ...
     async def replica_stats(self) -> dict: ...
+    async def raise_alert(self, key: str, severity: str, title: str, detail: str, category: str | None) -> None: ...
+    async def resolve_alert(self, key: str) -> None: ...
+    async def list_alerts(self, limit: int) -> list[dict]: ...
     async def set_testing(self, key: str, value: dict, duration: float) -> None: ...
     async def get_testing(self, key: str) -> dict | None: ...
     async def clear_testing(self, key: str) -> None: ...
@@ -671,7 +691,8 @@ class PostgresRepo:
     async def load_policies(self) -> dict | None:
         async with self._pool.acquire() as con:
             rows = await con.fetch(
-                "SELECT category, storage, encryption, deduplicate, priority FROM policies_config"
+                "SELECT category, storage, encryption, deduplicate, priority, replicas, "
+                "replica_storage, fallback_storage FROM policies_config"
             )
         if not rows:
             return None
@@ -681,6 +702,9 @@ class PostgresRepo:
                 "encryption": r["encryption"],
                 "deduplicate": r["deduplicate"],
                 "priority": r["priority"],
+                **({"replicas": r["replicas"]} if r["replicas"] else {}),
+                **({"replica_storage": r["replica_storage"]} if r["replica_storage"] else {}),
+                **({"fallback_storage": r["fallback_storage"]} if r["fallback_storage"] else {}),
             }
             for r in rows
         }
@@ -690,12 +714,16 @@ class PostgresRepo:
             async with con.transaction():
                 for name, p in policies.items():
                     await con.execute(
-                        "INSERT INTO policies_config (category, storage, encryption, deduplicate, priority) "
-                        "VALUES ($1,$2,$3,$4,$5) "
+                        "INSERT INTO policies_config (category, storage, encryption, deduplicate, priority, "
+                        "replicas, replica_storage, fallback_storage) "
+                        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) "
                         "ON CONFLICT (category) DO UPDATE SET storage=EXCLUDED.storage, "
                         "encryption=EXCLUDED.encryption, deduplicate=EXCLUDED.deduplicate, "
-                        "priority=EXCLUDED.priority, updated_at=now()",
+                        "priority=EXCLUDED.priority, replicas=EXCLUDED.replicas, "
+                        "replica_storage=EXCLUDED.replica_storage, "
+                        "fallback_storage=EXCLUDED.fallback_storage, updated_at=now()",
                         name, p["storage"], p["encryption"], p["deduplicate"], p["priority"],
+                        int(p.get("replicas", 0)), p.get("replica_storage"), p.get("fallback_storage"),
                     )
                 # delivered on commit to every worker and replica listening (slice G)
                 await con.execute(f"NOTIFY {self.POLICY_CHANNEL}")
@@ -1098,3 +1126,27 @@ class PostgresRepo:
                 "WHERE testing_lease.until < now() OR testing_lease.holder = EXCLUDED.holder "
                 "RETURNING holder", name, holder, float(seconds))
         return row is not None
+
+    # ---- application alerts ----
+    async def raise_alert(self, key, severity, title, detail, category) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute(
+                "INSERT INTO app_alerts (key, severity, title, detail, category) VALUES ($1,$2,$3,$4,$5) "
+                "ON CONFLICT (key) DO UPDATE SET severity = EXCLUDED.severity, title = EXCLUDED.title, "
+                "detail = EXCLUDED.detail, "
+                "raised_at = CASE WHEN app_alerts.resolved_at IS NULL THEN app_alerts.raised_at ELSE now() END, "
+                "resolved_at = NULL", key, severity, title, detail, category)
+
+    async def resolve_alert(self, key) -> None:
+        async with self._pool.acquire() as con:
+            await con.execute("UPDATE app_alerts SET resolved_at = now() WHERE key = $1 AND resolved_at IS NULL", key)
+
+    async def list_alerts(self, limit) -> list[dict]:
+        """Active alerts, plus the ones resolved in the last 10 minutes (so a recovery is visible)."""
+        async with self._pool.acquire() as con:
+            rows = await con.fetch(
+                "SELECT key, severity, title, detail, category, raised_at, resolved_at FROM app_alerts "
+                "WHERE resolved_at IS NULL OR resolved_at > now() - interval '10 minutes' "
+                "ORDER BY resolved_at IS NOT NULL, raised_at DESC LIMIT $1", int(limit))
+        return [{**dict(r), "raised_at": r["raised_at"].isoformat(),
+                 "resolved_at": r["resolved_at"].isoformat() if r["resolved_at"] else None} for r in rows]

@@ -25,6 +25,12 @@ class Bulkheads:
     def limit(self, priority: str) -> int:
         return self._limits.get(priority, self._limits["normal"])
 
+    def utilisation(self, category: str, priority: str) -> float:
+        """Share of this category's slots in use right now on this instance (0..1)."""
+        sem = self._sems.get((category, priority))
+        limit = self.limit(priority)
+        return 0.0 if sem is None else max(0.0, (limit - sem._value) / limit)
+
     @asynccontextmanager
     async def slot(self, category: str, priority: str):
         key = (category, priority)  # a policy priority change gets a fresh-sized semaphore
