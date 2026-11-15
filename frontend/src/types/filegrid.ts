@@ -72,6 +72,8 @@ export interface AuditEntry {
   user: string
   timestamp: string
   details?: string
+  /** the exact event (upload, download, verify, scrub_failed, repaired, erased, ...) */
+  event?: string
 }
 
 export interface StorageCategoryMetrics {

@@ -7,6 +7,24 @@ interface AuditDrawerProps {
   onClose: () => void
 }
 
+const EVENT_LABEL: Record<string, string> = {
+  upload: 'Încărcare',
+  download: 'Descărcare',
+  verify: 'Verificare integritate',
+  download_blocked: 'Descărcare BLOCATĂ (integritate eșuată)',
+  scrub_failed: 'Verificare periodică: fișier deteriorat',
+  repaired: 'Copia principală reparată',
+  replicated: 'Copie secundară scrisă',
+  replica_repaired: 'Copia secundară reparată',
+  receipt: 'Chitanță de integritate emisă',
+  receipt_refused: 'Chitanță refuzată',
+  erased: 'Document șters definitiv',
+}
+
+function eventLabel(e: { action: string; event?: string }): string {
+  return EVENT_LABEL[e.event ?? e.action] ?? (e.action === 'upload' ? 'Încărcare' : 'Descărcare')
+}
+
 export function AuditDrawer({ file, entries, onClose }: AuditDrawerProps) {
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/50 backdrop-blur-sm">
@@ -50,7 +68,12 @@ export function AuditDrawer({ file, entries, onClose }: AuditDrawerProps) {
                     ) : (
                       <Download className="h-3.5 w-3.5 text-grid-amber" />
                     )}
-                    {e.action === 'upload' ? 'Încărcare' : 'Descărcare'}
+                    {eventLabel(e)}
+                    {e.event && e.event !== 'upload' && e.event !== 'download' && (
+                      <span className="rounded border border-grid-border px-1.5 py-0.5 font-mono text-[10px] text-grid-muted">
+                        {e.event}
+                      </span>
+                    )}
                   </div>
                   <p className="mt-1 text-xs text-grid-muted">
                     {e.user} · {new Date(e.timestamp).toLocaleString('ro-RO')}

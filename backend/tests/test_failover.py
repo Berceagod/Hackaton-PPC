@@ -103,3 +103,15 @@ def test_the_alert_feed_merges_application_alerts_and_survives_no_prometheus(cli
     assert body["alerts"][0]["source"] == "app" and body["alerts"][0]["category"] == "drone_videos"
     assert client.get("/api/v1/alerts").status_code == 401
     assert client.get("/api/v1/alerts", headers=SIM).status_code == 403   # the simulator token cannot read
+
+
+def test_the_same_alert_for_several_storages_is_one_card_with_a_count():
+    from routes.alerts import group, _from_prometheus
+    raw = lambda st: {"labels": {"alertname": "FileIntegrityFailure", "severity": "critical", "category": "outage_records",  # noqa: E731
+                                 "storage": st, "reason": "checksum_mismatch"},
+                      "annotations": {"summary": f"failed on {st}"}, "state": "firing", "activeAt": "2026-11-15T09:46:29Z"}
+    cards = group([_from_prometheus(raw(s)) for s in ("s3", "postgres", "ftp")])
+    assert len(cards) == 1 and cards[0]["count"] == 3
+    assert cards[0]["targets"] == ["outage_records · ftp", "outage_records · postgres", "outage_records · s3"]
+    single = group([_from_prometheus(raw("s3"))])
+    assert single[0]["count"] == 1 and single[0]["targets"] == [] and single[0]["title"] == "failed on s3"

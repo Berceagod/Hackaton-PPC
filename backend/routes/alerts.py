@@ -73,6 +73,31 @@ def _from_app(row: dict) -> dict:
     }
 
 
+def _target(item: dict) -> str:
+    """Short label of what an alert is about: 'outage_records · s3'."""
+    return " · ".join(x for x in (item.get("category"), item.get("storage")) if x) or item["name"]
+
+
+def group(items: list[dict]) -> list[dict]:
+    """One card per kind of alert. The same rule firing for three storages is ONE problem seen in
+    three places, so it is shown once with a count and the list of what it affects."""
+    buckets: dict[tuple, list[dict]] = {}
+    for item in items:
+        buckets.setdefault((item["name"], item["state"], item["source"]), []).append(item)
+    out = []
+    for (name, _state, _source), members in buckets.items():
+        first = members[0]
+        if len(members) == 1:
+            out.append({**first, "count": 1, "targets": []})
+            continue
+        since = min((m["since"] for m in members if m.get("since")), default=None)
+        out.append({**first, "id": f"group:{name}:{first['state']}", "count": len(members),
+                    "title": f"{name}: {len(members)} cazuri active",
+                    "since": since, "category": None, "storage": None,
+                    "targets": sorted({_target(m) for m in members})})
+    return out
+
+
 @router.get("/alerts")
 async def alerts(request: Request, _: Principal = Depends(READERS)) -> dict:
     deps = request.app.state.deps
@@ -83,6 +108,7 @@ async def alerts(request: Request, _: Principal = Depends(READERS)) -> dict:
         items += [_from_app(r) for r in await deps.repo.list_alerts(50)]
     except Exception:
         log.warning("application alerts unavailable", exc_info=True)
+    items = group(items)
     items.sort(key=lambda a: (a["state"] == "resolved", a["state"] == "pending",
                               ORDER.get(a["severity"], 3), a["since"] or ""))
     active = [a for a in items if a["state"] == "firing"]

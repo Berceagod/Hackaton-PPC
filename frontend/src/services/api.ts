@@ -1018,6 +1018,10 @@ export interface AppAlert {
   storage?: string | null
   since?: string | null
   state: 'firing' | 'pending' | 'resolved' | string
+  /** how many alerts of this kind are merged into this card */
+  count?: number
+  /** what the merged alerts are about, e.g. 'outage_records · s3' */
+  targets?: string[]
 }
 
 export interface AlertsResponse {

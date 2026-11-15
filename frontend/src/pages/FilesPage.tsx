@@ -270,7 +270,7 @@ export function FilesPage({ pushToast }: FilesPageProps) {
                         <Download className="h-3.5 w-3.5 text-grid-cyan" />
                         {downloadingId === f.id ? '…' : 'Download'}
                       </button>
-                      {f.category === 'connection_docs' && (
+                      {(
                         <button
                           type="button"
                           onClick={() => void openAudit(f)}

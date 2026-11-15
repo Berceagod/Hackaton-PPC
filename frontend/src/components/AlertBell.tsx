@@ -114,6 +114,11 @@ export function AlertBell() {
                       <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${sev.chip}`}>
                         {sev.label}
                       </span>
+                      {(a.count ?? 1) > 1 && (
+                        <span className="rounded border border-grid-border px-1.5 py-0.5 text-[10px] font-semibold text-grid-text">
+                          ×{a.count}
+                        </span>
+                      )}
                       {a.state === 'pending' && (
                         <span className="rounded border border-grid-border px-1.5 py-0.5 text-[10px] text-grid-muted">
                           în așteptare
@@ -128,6 +133,18 @@ export function AlertBell() {
                     </div>
                     <p className="mt-1.5 text-[13px] font-medium text-grid-text">{a.title}</p>
                     {a.detail && <p className="mt-0.5 text-[12px] text-grid-muted">{a.detail}</p>}
+                    {a.targets && a.targets.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {a.targets.map((t) => (
+                          <span
+                            key={t}
+                            className="rounded border border-grid-border bg-grid-panel px-1.5 py-0.5 font-mono text-[10px] text-grid-text"
+                          >
+                            {t}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                     {a.runbook && (
                       <p className="mt-1 font-mono text-[10px] text-grid-cyan/80">Ce verific: {a.runbook}</p>
                     )}
